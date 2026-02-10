@@ -333,7 +333,7 @@ impl App {
 
         let job_detail_log = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(3)].as_ref())
+            .constraints([Constraint::Length(8), Constraint::Min(3)].as_ref())
             .split(master_detail[1]);
 
         // Help
@@ -464,9 +464,7 @@ impl App {
                     Span::raw(s),
                 ]);
             }
-
             let state = Line::from(state_spans);
-
             let name = Line::from(vec![
                 Span::styled("Name   ", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
