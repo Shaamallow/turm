@@ -3,7 +3,8 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::time::Duration;
+use std::{cmp::min, collections::HashSet, iter::once, path::PathBuf, process::Command};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
@@ -49,6 +50,20 @@ pub enum OutputFileView {
     Stderr,
 }
 
+pub enum DisplayEntry {
+    Job(usize),
+    CollapsedGroup { index: usize, total: usize },
+}
+
+impl DisplayEntry {
+    fn job_index(&self) -> usize {
+        match self {
+            DisplayEntry::Job(i) => *i,
+            DisplayEntry::CollapsedGroup { index, .. } => *index,
+        }
+    }
+}
+
 pub struct App {
     focus: Focus,
     dialog: Option<Dialog>,
@@ -68,6 +83,8 @@ pub struct App {
     job_list_area: Rect,
     job_output_area: Rect,
     pending_input_event: Option<Event>,
+    display_entries: Vec<DisplayEntry>,
+    expanded_arrays: HashSet<String>,
 }
 
 pub struct Job {
@@ -160,6 +177,8 @@ impl App {
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
             pending_input_event: None,
+            display_entries: Vec::new(),
+            expanded_arrays: HashSet::new(),
         }
     }
 }
@@ -284,19 +303,21 @@ impl App {
         match msg {
             AppMessage::Jobs(jobs) => {
                 // On refresh: keep the same job selected if it still exists
-                let old_index = self.job_list_state.selected();
-                let old_id = old_index.and_then(|i| self.jobs.get(i)).map(|j| j.id());
+                let old_id = self.selected_job().map(|j| j.id());
 
                 self.jobs = jobs;
+                self.recompute_display_entries();
 
-                if self.jobs.is_empty() {
+                if self.display_entries.is_empty() {
                     self.job_list_state.select(None);
                 } else if let Some(id) = old_id {
                     let new_index = self
-                        .jobs
+                        .display_entries
                         .iter()
-                        .position(|j| j.id() == id)
-                        .unwrap_or(old_index.unwrap_or(0).min(self.jobs.len() - 1));
+                        .position(|entry| {
+                            self.jobs.get(entry.job_index()).map(|j| j.id()).as_deref() == Some(&id)
+                        })
+                        .unwrap_or(0);
                     self.job_list_state.select(Some(new_index));
                 } else {
                     self.job_list_state.select_first();
@@ -482,6 +503,9 @@ impl App {
                         KeyCode::Char('w') => {
                             self.job_output_wrap = !self.job_output_wrap;
                         }
+                        KeyCode::Char('a') => {
+                            self.toggle_array_collapse();
+                        }
                         _ => {}
                     };
                 }
@@ -551,6 +575,7 @@ impl App {
             ("t", "set time limit"),
             ("o", "toggle stdout/stderr"),
             ("w", "toggle text wrap"),
+            ("a", "expand/collapse array"),
         ];
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
@@ -588,41 +613,80 @@ impl App {
             .max()
             .unwrap_or(0);
         let jobs: Vec<ListItem> = self
-            .jobs
+            .display_entries
             .iter()
-            .map(|j| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "{:<max$.max$}",
-                            j.state_compact,
-                            max = max_state_compact_len
+            .filter_map(|entry| match entry {
+                DisplayEntry::Job(i) => self.jobs.get(*i).map(|j| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{:<max$.max$}",
+                                j.state_compact,
+                                max = max_state_compact_len
+                            ),
+                            Style::default(),
                         ),
-                        Style::default(),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.id(), max = max_id_len),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.partition, max = max_partition_len),
-                        Style::default().fg(Color::Blue),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.user, max = max_user_len),
-                        Style::default().fg(Color::Green),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:>max$.max$}", j.time, max = max_time_len),
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::raw(" "),
-                    Span::raw(&j.name),
-                ]))
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.id(), max = max_id_len),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.user, max = max_user_len),
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:>max$.max$}", j.time, max = max_time_len),
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::raw(" "),
+                        Span::raw(&j.name),
+                    ]))
+                }),
+                DisplayEntry::CollapsedGroup { index, total } => self.jobs.get(*index).map(|j| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{:<max$.max$}",
+                                j.state_compact,
+                                max = max_state_compact_len
+                            ),
+                            Style::default(),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.array_id, max = max_id_len),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.user, max = max_user_len),
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:>max$.max$}", j.time, max = max_time_len),
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("▶ {} [{}]", j.name, total),
+                            Style::default().add_modifier(Modifier::DIM),
+                        ),
+                    ]))
+                }),
             })
             .collect();
         let job_list = List::new(jobs)
@@ -1010,7 +1074,8 @@ impl App {
     fn selected_job(&self) -> Option<&Job> {
         self.job_list_state
             .selected()
-            .and_then(|i| self.jobs.get(i))
+            .and_then(|i| self.display_entries.get(i))
+            .and_then(|entry| self.jobs.get(entry.job_index()))
     }
 
     fn selected_job_id(&self) -> Option<String> {
@@ -1090,6 +1155,76 @@ impl App {
             }
             ScrollAnchor::Bottom => {
                 self.job_output_offset = self.job_output_offset.saturating_add(delta)
+            }
+        }
+    }
+
+    fn recompute_display_entries(&mut self) {
+        let base_indices: Vec<usize> = (0..self.jobs.len()).collect();
+
+        use std::collections::HashMap;
+
+        // Group indices by array_id (only for array jobs)
+        let mut array_groups: HashMap<&str, Vec<usize>> = HashMap::new();
+
+        for &idx in &base_indices {
+            let job = &self.jobs[idx];
+            if job.array_step.is_some() {
+                array_groups.entry(&job.array_id).or_default().push(idx);
+            }
+        }
+
+        // Determine which array_ids should be collapsed
+        let mut collapsed_ids: HashSet<&str> = HashSet::new();
+        for (array_id, indices) in &array_groups {
+            if indices.len() > 1
+                && !self.expanded_arrays.contains(*array_id)
+                && indices.iter().all(|&i| self.jobs[i].state == "PENDING")
+            {
+                collapsed_ids.insert(array_id);
+            }
+        }
+
+        // Build display entries
+        let mut seen_collapsed: HashSet<&str> = HashSet::new();
+        self.display_entries = base_indices
+            .iter()
+            .filter_map(|&idx| {
+                let job = &self.jobs[idx];
+                if job.array_step.is_some() && collapsed_ids.contains(job.array_id.as_str()) {
+                    if seen_collapsed.insert(&job.array_id) {
+                        let total = array_groups[job.array_id.as_str()].len();
+                        Some(DisplayEntry::CollapsedGroup { index: idx, total })
+                    } else {
+                        None // skip, already represented by group header
+                    }
+                } else {
+                    Some(DisplayEntry::Job(idx))
+                }
+            })
+            .collect();
+
+        // Clamp selection
+        if self.display_entries.is_empty() {
+            self.job_list_state.select(None);
+        } else if let Some(sel) = self.job_list_state.selected() {
+            if sel >= self.display_entries.len() {
+                self.job_list_state
+                    .select(Some(self.display_entries.len() - 1));
+            }
+        }
+    }
+
+    fn toggle_array_collapse(&mut self) {
+        if let Some(job) = self.selected_job() {
+            if job.array_step.is_some() {
+                let array_id = job.array_id.clone();
+                if self.expanded_arrays.contains(&array_id) {
+                    self.expanded_arrays.remove(&array_id);
+                } else {
+                    self.expanded_arrays.insert(array_id);
+                }
+                self.recompute_display_entries();
             }
         }
     }
