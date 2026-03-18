@@ -3,7 +3,8 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::{cmp::min, collections::HashSet, iter::once, path::PathBuf, process::Command};
+use std::{process::Stdio, time::Duration};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_acct::JobAcctWatcherHandle;
@@ -84,6 +85,20 @@ pub enum InputMode {
     Search,
 }
 
+pub enum DisplayEntry {
+    Job(usize),
+    CollapsedGroup { index: usize, total: usize },
+}
+
+impl DisplayEntry {
+    fn job_index(&self) -> usize {
+        match self {
+            DisplayEntry::Job(i) => *i,
+            DisplayEntry::CollapsedGroup { index, .. } => *index,
+        }
+    }
+}
+
 pub struct App {
     focus: Focus,
     dialog: Option<Dialog>,
@@ -112,7 +127,8 @@ pub struct App {
     pending_input_event: Option<Event>,
     input_mode: InputMode,
     search_query: String,
-    filtered_indices: Vec<usize>,
+    filtered_indices: Vec<DisplayEntry>,
+    expanded_arrays: HashSet<String>,
 }
 
 pub struct Job {
@@ -223,6 +239,7 @@ impl App {
             input_mode: InputMode::default(),
             search_query: String::new(),
             filtered_indices: Vec::new(),
+            expanded_arrays: HashSet::new(),
         }
     }
 }
@@ -555,6 +572,11 @@ impl App {
                             KeyCode::Char('w') => {
                                 self.job_output_wrap = !self.job_output_wrap;
                             }
+                            KeyCode::Char('a') => {
+                                if matches!(self.selected_tab, SelectedTab::Jobs) {
+                                    self.toggle_array_collapse();
+                                }
+                            }
                             KeyCode::Char(']') => self.next_tab(),
                             KeyCode::Char('[') => self.previous_tab(),
                             KeyCode::Char('/') => {
@@ -681,6 +703,7 @@ impl App {
                 ("t", "set time limit"),
                 ("o", "toggle stdout/stderr"),
                 ("w", "toggle text wrap"),
+                ("a", "expand/collapse array"),
                 ("/", "search"),
             ];
 
@@ -720,40 +743,78 @@ impl App {
         let jobs: Vec<ListItem> = self
             .filtered_indices
             .iter()
-            .filter_map(|&i| self.jobs.get(i))
-            .map(|j| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "{:<max$.max$}",
-                            j.state_compact,
-                            max = max_state_compact_len
+            .filter_map(|entry| match entry {
+                DisplayEntry::Job(i) => self.jobs.get(*i).map(|j| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{:<max$.max$}",
+                                j.state_compact,
+                                max = max_state_compact_len
+                            ),
+                            Style::default(),
                         ),
-                        Style::default(),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.id(), max = max_id_len),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.partition, max = max_partition_len),
-                        Style::default().fg(Color::Blue),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.user, max = max_user_len),
-                        Style::default().fg(Color::Green),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:>max$.max$}", j.time, max = max_time_len),
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::raw(" "),
-                    Span::raw(&j.name),
-                ]))
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.id(), max = max_id_len),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.user, max = max_user_len),
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:>max$.max$}", j.time, max = max_time_len),
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::raw(" "),
+                        Span::raw(&j.name),
+                    ]))
+                }),
+                DisplayEntry::CollapsedGroup { index, total } => self.jobs.get(*index).map(|j| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{:<max$.max$}",
+                                j.state_compact,
+                                max = max_state_compact_len
+                            ),
+                            Style::default(),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.array_id, max = max_id_len),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:<max$.max$}", j.user, max = max_user_len),
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{:>max$.max$}", j.time, max = max_time_len),
+                            Style::default().fg(Color::Red),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("▶ {} [{}]", j.name, total),
+                            Style::default().add_modifier(Modifier::DIM),
+                        ),
+                    ]))
+                }),
             })
             .collect();
         let job_list_title = if self.search_query.is_empty() {
@@ -811,7 +872,7 @@ impl App {
         let old_jobs: Vec<ListItem> = self
             .filtered_indices
             .iter()
-            .filter_map(|&i| self.sacct_jobs.get(i))
+            .filter_map(|entry| self.sacct_jobs.get(entry.job_index()))
             .map(|j| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -1413,7 +1474,7 @@ impl App {
         state
             .selected()
             .and_then(|i| self.filtered_indices.get(i))
-            .and_then(|&real_i| jobs.get(real_i))
+            .and_then(|entry| jobs.get(entry.job_index()))
     }
 
     fn selected_job_id(&self) -> Option<String> {
@@ -1426,7 +1487,7 @@ impl App {
             SelectedTab::Sacct => &self.sacct_jobs,
         };
         let query = self.search_query.to_lowercase();
-        self.filtered_indices = if query.is_empty() {
+        let base_indices: Vec<usize> = if query.is_empty() {
             (0..jobs.len()).collect()
         } else {
             jobs.iter()
@@ -1435,6 +1496,62 @@ impl App {
                 .map(|(i, _)| i)
                 .collect()
         };
+
+        // On the Jobs tab, collapse PENDING array groups
+        if matches!(self.selected_tab, SelectedTab::Jobs) {
+            use std::collections::HashMap;
+
+            // Group indices by array_id (only for array jobs)
+            let mut array_groups: HashMap<&str, Vec<usize>> = HashMap::new();
+            let mut order: Vec<&str> = Vec::new();
+
+            for &idx in &base_indices {
+                let job = &jobs[idx];
+                if job.array_step.is_some() {
+                    let entry = array_groups.entry(&job.array_id).or_default();
+                    if entry.is_empty() {
+                        order.push(&job.array_id);
+                    }
+                    entry.push(idx);
+                }
+            }
+
+            // Determine which array_ids should be collapsed
+            let mut collapsed_ids: HashSet<&str> = HashSet::new();
+            for (array_id, indices) in &array_groups {
+                if indices.len() > 1
+                    && !self.expanded_arrays.contains(*array_id)
+                    && indices.iter().all(|&i| jobs[i].state == "PENDING")
+                {
+                    collapsed_ids.insert(array_id);
+                }
+            }
+
+            // Build display entries
+            let mut seen_collapsed: HashSet<&str> = HashSet::new();
+            self.filtered_indices = base_indices
+                .iter()
+                .filter_map(|&idx| {
+                    let job = &jobs[idx];
+                    if job.array_step.is_some() && collapsed_ids.contains(job.array_id.as_str()) {
+                        if seen_collapsed.insert(&job.array_id) {
+                            let total = array_groups[job.array_id.as_str()].len();
+                            Some(DisplayEntry::CollapsedGroup { index: idx, total })
+                        } else {
+                            None // skip, already represented by group header
+                        }
+                    } else {
+                        Some(DisplayEntry::Job(idx))
+                    }
+                })
+                .collect();
+        } else {
+            self.filtered_indices = base_indices
+                .into_iter()
+                .map(DisplayEntry::Job)
+                .collect();
+        }
+
         // Clamp selection
         let state = match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
@@ -1445,6 +1562,20 @@ impl App {
         } else if let Some(sel) = state.selected() {
             if sel >= self.filtered_indices.len() {
                 state.select(Some(self.filtered_indices.len() - 1));
+            }
+        }
+    }
+
+    fn toggle_array_collapse(&mut self) {
+        if let Some(job) = self.selected_job() {
+            if job.array_step.is_some() {
+                let array_id = job.array_id.clone();
+                if self.expanded_arrays.contains(&array_id) {
+                    self.expanded_arrays.remove(&array_id);
+                } else {
+                    self.expanded_arrays.insert(array_id);
+                }
+                self.recompute_filtered_indices();
             }
         }
     }
