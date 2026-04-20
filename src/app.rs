@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_acct::JobAcctWatcherHandle;
 use crate::job_watcher::JobWatcherHandle;
-use crate::utils::{copy_to_clipboard, fit_text};
+use crate::utils::{copy_to_clipboard, fit_text, state_color};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::{
@@ -808,7 +808,7 @@ impl App {
                                 j.state_compact,
                                 max = max_state_compact_len
                             ),
-                            Style::default(),
+                            Style::default().fg(state_color(&j.state_compact)),
                         ),
                         Span::raw(" "),
                         Span::styled(
@@ -842,7 +842,7 @@ impl App {
                                 j.state_compact,
                                 max = max_state_compact_len
                             ),
-                            Style::default(),
+                            Style::default().fg(state_color(&j.state_compact)),
                         ),
                         Span::raw(" "),
                         Span::styled(
@@ -937,7 +937,7 @@ impl App {
                             j.state_compact,
                             max = max_state_compact_len
                         ),
-                        Style::default(),
+                        Style::default().fg(state_color(&j.state_compact)),
                     ),
                     Span::raw(" "),
                     Span::styled(
