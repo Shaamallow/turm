@@ -7,107 +7,150 @@ use regex::Regex;
 use crate::app::AppMessage;
 use crate::app::Job;
 
-struct JobWatcher {
+struct JobAcctWatcher {
     app: Sender<AppMessage>,
     interval: Duration,
-    squeue_args: Vec<String>,
+    sacct_args: Vec<String>,
 }
 
-pub struct JobWatcherHandle {}
+/// Filter squeue CLI args to only those compatible with sacct,
+/// translating flag names where they differ.
+fn sacct_compatible_args(squeue_args: &[String]) -> Vec<String> {
+    squeue_args
+        .iter()
+        .filter_map(|arg| {
+            // Translate squeue flag names to sacct equivalents
+            if let Some(val) = arg.strip_prefix("--job=") {
+                return Some(format!("--jobs={}", val));
+            }
+            if let Some(val) = arg.strip_prefix("--states=") {
+                return Some(format!("--state={}", val));
+            }
+            // Drop flags that sacct doesn't support
+            if arg == "--all"
+                || arg == "--hide"
+                || arg == "--me"
+                || arg == "--sibling"
+                || arg.starts_with("--licenses=")
+                || arg.starts_with("--reservation=")
+                || arg.starts_with("--step=")
+                || arg.starts_with("--sort=")
+            {
+                return None;
+            }
+            // Pass through flags that work in both squeue and sacct
+            Some(arg.clone())
+        })
+        .collect()
+}
 
-impl JobWatcher {
+impl JobAcctWatcher {
     fn new(app: Sender<AppMessage>, interval: Duration, squeue_args: Vec<String>) -> Self {
         Self {
             app,
             interval,
-            squeue_args,
+            sacct_args: sacct_compatible_args(&squeue_args),
         }
     }
 
     fn run(&mut self) -> Self {
         let output_separator = "###turm###";
-        let fields = [
+        let fields_sacct = [
             "jobid",
-            "name",
+            "jobname",
             "state",
-            "username",
-            "timeused",
-            "timelimit",
-            "StartTime",
-            "tres-alloc",
-            "partition",
-            "nodelist",
-            "stdout",
-            "stderr",
-            "command",
-            "statecompact",
-            "reason",
-            "ArrayJobID",  // %A
-            "ArrayTaskID", // %a
-            "NodeList",    // %N
-            "WorkDir",     // for fallback
+            "user",
+            "Elapsed",
+            "AllocTRES",
+            "Partition",
+            "NodeList",
+            "SubmitLine",
+            "Reason",
+            "WorkDir",
+            "StdOut",
+            "StdErr",
         ];
-        let output_format = fields
-            .map(|s| s.to_owned() + ":" + output_separator)
-            .join(",");
+        let output_format_sacct = fields_sacct.join(",");
 
         loop {
-            log::debug!("squeue: running command with args: {:?}", self.squeue_args);
+            log::debug!("sacct: running command with args: {:?}", self.sacct_args);
 
-            let output = Command::new("squeue")
-                .args(&self.squeue_args)
-                .arg("--array")
+            let output = Command::new("sacct")
+                .args(&self.sacct_args)
+                .arg("--parsable2")
                 .arg("--noheader")
-                .arg("--Format")
-                .arg(&output_format)
+                .arg(format!("--delimiter={}", output_separator))
+                .arg("--format")
+                .arg(&output_format_sacct)
                 .output()
-                .expect("failed to execute process");
+                .expect("failed to execute sacct process");
 
+            let raw_stdout = String::from_utf8_lossy(&output.stdout);
             let raw_stderr = String::from_utf8_lossy(&output.stderr);
+            log::debug!("sacct: exit status: {}", output.status);
             if !raw_stderr.is_empty() {
-                log::warn!("squeue stderr: {}", raw_stderr.trim());
+                log::warn!("sacct stderr: {}", raw_stderr.trim());
             }
-            log::debug!("squeue: exit status: {}, stdout {} bytes", output.status, output.stdout.len());
+            log::debug!("sacct: raw stdout ({} bytes):\n{}", raw_stdout.len(), raw_stdout);
 
-            let jobs: Vec<Job> = output
+            let jobs_sacct: Vec<Job> = output
                 .stdout
                 .lines()
                 .map(|l| l.unwrap().trim().to_string())
+                .filter(|l| !l.is_empty())
                 .filter_map(|l| {
                     let parts: Vec<_> = l.split(output_separator).collect();
 
-                    if parts.len() != fields.len() + 1 {
+                    if parts.len() != fields_sacct.len() {
+                        log::debug!("sacct: skipping line (got {} parts, expected {}): {}", parts.len(), fields_sacct.len(), l);
                         return None;
                     }
 
+                    // jobid 0,jobname 1,state 2,user 3,Elapsed 4,AllocTRES 5,Partition 6,NodeList 7,SubmitLine 8,Reason 9,WorkDir 10,StdOut 11,StdErr 12
                     let id = parts[0];
                     let name = parts[1];
                     let state = parts[2];
+
+                    // remove the .batch and .extern jobs from sacct
+                    if id.contains(".") {
+                        log::debug!("sacct: skipping sub-job: {}", id);
+                        return None;
+                    }
+                    // do not print running jobs, handled by squeue
+                    if state == "RUNNING" {
+                        log::debug!("sacct: skipping RUNNING job: {}", id);
+                        return None;
+                    }
+
                     let user = parts[3];
                     let time = parts[4];
-                    let time_limit = parts[5];
-                    let start_time = parts[6];
-                    let tres = parts[7];
-                    let partition = parts[8];
-                    let nodelist = parts[9];
-                    let stdout = parts[10];
-                    let stderr = parts[11];
-                    let command = parts[12];
-                    let state_compact = parts[13];
-                    let reason = parts[14];
+                    let tres = parts[5];
+                    let partition = parts[6];
+                    let nodelist = parts[7];
+                    let command = parts[8];
+                    let state_compact = state.get(0..1).unwrap_or("?");
+                    let reason = parts[9];
+                    let node_list = parts[7];
+                    let working_dir = parts[10];
+                    let stdout = parts[11];
+                    let stderr = parts[12];
 
-                    let array_job_id = parts[15];
-                    let array_task_id = parts[16];
-                    let node_list = parts[17];
-                    let working_dir = parts[18];
+                    // Parse array job ID from sacct jobid format: "12345_2" → master=12345, task=2
+                    let (array_job_id, array_task_id) = if let Some((master, task)) = id.split_once('_') {
+                        (master, Some(task))
+                    } else {
+                        (id, None)
+                    };
+
+                    log::debug!(
+                        "sacct: parsed job {} (state={}, name={}, array_master={}, array_task={:?}, stdout={}, stderr={})",
+                        id, state, name, array_job_id, array_task_id, stdout, stderr
+                    );
 
                     Some(Job {
                         job_id: id.to_owned(),
                         array_id: array_job_id.to_owned(),
-                        array_step: match array_task_id {
-                            "N/A" => None,
-                            _ => Some(array_task_id.to_owned()),
-                        },
+                        array_step: array_task_id.map(|s| s.to_owned()),
                         name: name.to_owned(),
                         state: state.to_owned(),
                         state_compact: state_compact.to_owned(),
@@ -118,8 +161,8 @@ impl JobWatcher {
                         },
                         user: user.to_owned(),
                         time: time.to_owned(),
-                        time_limit: time_limit.to_owned(),
-                        start_time: start_time.to_owned(),
+                        time_limit: String::new(),
+                        start_time: String::new(),
                         tres: tres.to_owned(),
                         partition: partition.to_owned(),
                         nodelist: nodelist.to_owned(),
@@ -127,7 +170,7 @@ impl JobWatcher {
                         stdout: Self::resolve_path(
                             stdout,
                             array_job_id,
-                            array_task_id,
+                            array_task_id.unwrap_or("N/A"),
                             id,
                             node_list,
                             user,
@@ -137,23 +180,23 @@ impl JobWatcher {
                         stderr: Self::resolve_path(
                             stderr,
                             array_job_id,
-                            array_task_id,
+                            array_task_id.unwrap_or("N/A"),
                             id,
                             node_list,
                             user,
                             name,
                             working_dir,
-                        ), // TODO fill all fields
+                        ),
                     })
                 })
                 .collect();
-            log::info!("squeue: sending {} jobs", jobs.len());
-            self.app.send(AppMessage::Jobs(jobs)).unwrap();
+
+            log::info!("sacct: sending {} jobs", jobs_sacct.len());
+            self.app.send(AppMessage::SacctJobs(jobs_sacct)).unwrap();
             thread::sleep(self.interval);
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn resolve_path(
         path: &str,
         array_master: &str,
@@ -218,9 +261,11 @@ impl JobWatcher {
     }
 }
 
-impl JobWatcherHandle {
+pub struct JobAcctWatcherHandle {}
+
+impl JobAcctWatcherHandle {
     pub fn new(app: Sender<AppMessage>, interval: Duration, squeue_args: Vec<String>) -> Self {
-        let mut actor = JobWatcher::new(app, interval, squeue_args);
+        let mut actor = JobAcctWatcher::new(app, interval, squeue_args);
         thread::spawn(move || actor.run());
 
         Self {}

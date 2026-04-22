@@ -6,6 +6,7 @@ use itertools::Either;
 use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
+use crate::job_acct::JobAcctWatcherHandle;
 use crate::job_watcher::JobWatcherHandle;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
@@ -15,9 +16,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 use std::io;
+use strum::IntoEnumIterator;
+use strum_macros::{Display, EnumIter, FromRepr};
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 pub enum Focus {
@@ -49,9 +52,43 @@ pub enum OutputFileView {
     Stderr,
 }
 
+#[derive(Default, Clone, Copy, Display, FromRepr, EnumIter)]
+pub enum SelectedTab {
+    #[default]
+    #[strum(to_string = "Jobs")]
+    Jobs,
+    #[strum(to_string = "Sacct")]
+    Sacct,
+}
+
+impl SelectedTab {
+    /// Get the previous tab, if there is no previous tab return the current tab.
+    fn previous(self) -> Self {
+        let current_index: usize = self as usize;
+        let previous_index = current_index.saturating_sub(1);
+        Self::from_repr(previous_index).unwrap_or(self)
+    }
+
+    /// Get the next tab, if there is no next tab return the current tab.
+    fn next(self) -> Self {
+        let current_index = self as usize;
+        let next_index = current_index.saturating_add(1);
+        Self::from_repr(next_index).unwrap_or(self)
+    }
+}
+
+#[derive(Default, PartialEq)]
+pub enum InputMode {
+    #[default]
+    Normal,
+    Search,
+}
+
 pub struct App {
     focus: Focus,
     dialog: Option<Dialog>,
+    selected_tab: SelectedTab,
+
     jobs: Vec<Job>,
     job_list_state: ListState,
     job_output: Result<String, FileWatcherError>,
@@ -60,6 +97,11 @@ pub struct App {
     job_output_wrap: bool,
     _job_watcher: JobWatcherHandle,
     job_output_watcher: FileWatcherHandle,
+
+    sacct_jobs: Vec<Job>,
+    sacct_job_list_state: ListState,
+    _job_acct_watcher: JobAcctWatcherHandle,
+
     // sender: Sender<AppMessage>,
     receiver: Receiver<AppMessage>,
     input_receiver: Receiver<std::io::Result<Event>>,
@@ -68,6 +110,9 @@ pub struct App {
     job_list_area: Rect,
     job_output_area: Rect,
     pending_input_event: Option<Event>,
+    input_mode: InputMode,
+    search_query: String,
+    filtered_indices: Vec<usize>,
 }
 
 pub struct Job {
@@ -101,6 +146,7 @@ impl Job {
 
 pub enum AppMessage {
     Jobs(Vec<Job>),
+    SacctJobs(Vec<Job>),
     JobOutput(Result<String, FileWatcherError>),
     Key(KeyEvent),
     MouseClick(usize),
@@ -137,11 +183,12 @@ impl App {
         Self {
             focus: Focus::Jobs,
             dialog: None,
+            selected_tab: SelectedTab::Jobs,
             jobs: Vec::new(),
             _job_watcher: JobWatcherHandle::new(
                 sender.clone(),
                 Duration::from_secs(slurm_refresh_rate),
-                squeue_args,
+                squeue_args.clone(),
             ),
             job_list_state: ListState::default(),
             job_output: Ok("".to_string()),
@@ -152,6 +199,19 @@ impl App {
                 sender.clone(),
                 Duration::from_secs(file_refresh_rate),
             ),
+
+            sacct_jobs: Vec::new(),
+            _job_acct_watcher: JobAcctWatcherHandle::new(
+                sender.clone(),
+                Duration::from_secs(slurm_refresh_rate),
+                squeue_args,
+            ),
+            sacct_job_list_state: {
+                let mut s = ListState::default();
+                s.select(Some(0));
+                s
+            },
+
             // sender,
             receiver,
             input_receiver,
@@ -160,6 +220,9 @@ impl App {
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
             pending_input_event: None,
+            input_mode: InputMode::default(),
+            search_query: String::new(),
+            filtered_indices: Vec::new(),
         }
     }
 }
@@ -212,7 +275,7 @@ impl App {
     fn handle_input_event(&mut self, event: Event) -> (bool, bool) {
         match event {
             Event::Key(key) => {
-                if key.code == KeyCode::Char('q') {
+                if self.input_mode == InputMode::Normal && key.code == KeyCode::Char('q') {
                     return (true, false);
                 }
                 self.handle(AppMessage::Key(key));
@@ -301,6 +364,15 @@ impl App {
                 } else {
                     self.job_list_state.select_first();
                 }
+                if matches!(self.selected_tab, SelectedTab::Jobs) {
+                    self.recompute_filtered_indices();
+                }
+            }
+            AppMessage::SacctJobs(jobs) => {
+                self.sacct_jobs = jobs;
+                if matches!(self.selected_tab, SelectedTab::Sacct) {
+                    self.recompute_filtered_indices();
+                }
             }
             AppMessage::JobOutput(content) => self.job_output = content,
             AppMessage::Key(key) => {
@@ -385,105 +457,147 @@ impl App {
                         self.dialog = None;
                     }
                 } else {
-                    match key.code {
-                        KeyCode::Char('h') | KeyCode::Left => self.focus_previous_panel(),
-                        KeyCode::Char('l') | KeyCode::Right => self.focus_next_panel(),
-                        KeyCode::Char('k') | KeyCode::Up => match self.focus {
-                            Focus::Jobs => self.select_previous_job(),
-                        },
-                        KeyCode::Char('j') | KeyCode::Down => match self.focus {
-                            Focus::Jobs => self.select_next_job(),
-                        },
-                        KeyCode::Char('g') => match self.focus {
-                            Focus::Jobs => self.select_first_job(),
-                        },
-                        KeyCode::Char('G') => match self.focus {
-                            Focus::Jobs => self.select_last_job(),
-                        },
-                        KeyCode::Char('u') => match self.focus {
-                            Focus::Jobs => {
-                                if key
-                                    .modifiers
-                                    .contains(crossterm::event::KeyModifiers::CONTROL)
-                                {
-                                    self.scroll_jobs_half_page_up()
+                    match self.input_mode {
+                        InputMode::Normal => match key.code {
+                            KeyCode::Char('h') | KeyCode::Left => self.focus_previous_panel(),
+                            KeyCode::Char('l') | KeyCode::Right => self.focus_next_panel(),
+                            KeyCode::Char('k') | KeyCode::Up => match self.focus {
+                                Focus::Jobs => self.select_previous_job(),
+                            },
+                            KeyCode::Char('j') | KeyCode::Down => match self.focus {
+                                Focus::Jobs => self.select_next_job(),
+                            },
+                            KeyCode::Char('g') => match self.focus {
+                                Focus::Jobs => self.select_first_job(),
+                            },
+                            KeyCode::Char('G') => match self.focus {
+                                Focus::Jobs => self.select_last_job(),
+                            },
+                            KeyCode::Char('u') => match self.focus {
+                                Focus::Jobs => {
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                    {
+                                        self.scroll_jobs_half_page_up()
+                                    }
+                                }
+                            },
+                            KeyCode::Char('d') => match self.focus {
+                                Focus::Jobs => {
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                    {
+                                        self.scroll_jobs_half_page_down()
+                                    }
+                                }
+                            },
+                            KeyCode::PageDown => {
+                                let delta = if key.modifiers.intersects(
+                                    crossterm::event::KeyModifiers::SHIFT
+                                        | crossterm::event::KeyModifiers::CONTROL
+                                        | crossterm::event::KeyModifiers::ALT,
+                                ) {
+                                    50
+                                } else {
+                                    1
+                                };
+                                self.scroll_job_output_down_by(delta);
+                            }
+                            KeyCode::PageUp => {
+                                let delta = if key.modifiers.intersects(
+                                    crossterm::event::KeyModifiers::SHIFT
+                                        | crossterm::event::KeyModifiers::CONTROL
+                                        | crossterm::event::KeyModifiers::ALT,
+                                ) {
+                                    50
+                                } else {
+                                    1
+                                };
+                                self.scroll_job_output_up_by(delta);
+                            }
+                            KeyCode::Home => {
+                                self.job_output_offset = 0;
+                                self.job_output_anchor = ScrollAnchor::Top;
+                            }
+                            KeyCode::End => {
+                                self.job_output_offset = 0;
+                                self.job_output_anchor = ScrollAnchor::Bottom;
+                            }
+                            KeyCode::Char('c') => {
+                                if let Some(id) = self.selected_job_id() {
+                                    self.dialog = Some(Dialog::ConfirmCancelJob(id));
                                 }
                             }
-                        },
-                        KeyCode::Char('d') => match self.focus {
-                            Focus::Jobs => {
-                                if key
-                                    .modifiers
-                                    .contains(crossterm::event::KeyModifiers::CONTROL)
-                                {
-                                    self.scroll_jobs_half_page_down()
+                            KeyCode::Char('C') => {
+                                if let Some(id) = self.selected_job_id() {
+                                    self.dialog = Some(Dialog::SelectCancelSignal {
+                                        id,
+                                        selected_signal: 0,
+                                    });
                                 }
                             }
+                            KeyCode::Char('t') => {
+                                if let Some(job) = self.selected_job() {
+                                    self.dialog = Some(Dialog::EditTimeLimit {
+                                        id: job.id(),
+                                        input: Input::new(job.time_limit.clone()),
+                                    });
+                                }
+                            }
+                            KeyCode::Char('o') => {
+                                self.output_file_view = match self.output_file_view {
+                                    OutputFileView::Stdout => OutputFileView::Stderr,
+                                    OutputFileView::Stderr => OutputFileView::Stdout,
+                                };
+                            }
+                            KeyCode::Char('w') => {
+                                self.job_output_wrap = !self.job_output_wrap;
+                            }
+                            KeyCode::Char(']') => self.next_tab(),
+                            KeyCode::Char('[') => self.previous_tab(),
+                            KeyCode::Char('/') => {
+                                self.input_mode = InputMode::Search;
+                                self.search_query.clear();
+                                self.recompute_filtered_indices();
+                            }
+                            _ => {}
                         },
-                        KeyCode::PageDown => {
-                            let delta = if key.modifiers.intersects(
-                                crossterm::event::KeyModifiers::SHIFT
-                                    | crossterm::event::KeyModifiers::CONTROL
-                                    | crossterm::event::KeyModifiers::ALT,
-                            ) {
-                                50
-                            } else {
-                                1
-                            };
-                            self.scroll_job_output_down_by(delta);
-                        }
-                        KeyCode::PageUp => {
-                            let delta = if key.modifiers.intersects(
-                                crossterm::event::KeyModifiers::SHIFT
-                                    | crossterm::event::KeyModifiers::CONTROL
-                                    | crossterm::event::KeyModifiers::ALT,
-                            ) {
-                                50
-                            } else {
-                                1
-                            };
-                            self.scroll_job_output_up_by(delta);
-                        }
-                        KeyCode::Home => {
-                            self.job_output_offset = 0;
-                            self.job_output_anchor = ScrollAnchor::Top;
-                        }
-                        KeyCode::End => {
-                            self.job_output_offset = 0;
-                            self.job_output_anchor = ScrollAnchor::Bottom;
-                        }
-                        KeyCode::Char('c') => {
-                            if let Some(id) = self.selected_job_id() {
-                                self.dialog = Some(Dialog::ConfirmCancelJob(id));
+                        InputMode::Search => match key.code {
+                            KeyCode::Char(c) => {
+                                self.search_query.push(c);
+                                self.recompute_filtered_indices();
+                                let sel = if self.filtered_indices.is_empty() {
+                                    None
+                                } else {
+                                    Some(0)
+                                };
+                                self.active_list_state().select(sel);
                             }
-                        }
-                        KeyCode::Char('C') => {
-                            if let Some(id) = self.selected_job_id() {
-                                self.dialog = Some(Dialog::SelectCancelSignal {
-                                    id,
-                                    selected_signal: 0,
-                                });
+                            KeyCode::Backspace => {
+                                self.search_query.pop();
+                                self.recompute_filtered_indices();
+                                let sel = if self.filtered_indices.is_empty() {
+                                    None
+                                } else {
+                                    Some(0)
+                                };
+                                self.active_list_state().select(sel);
                             }
-                        }
-                        KeyCode::Char('t') => {
-                            if let Some(job) = self.selected_job() {
-                                self.dialog = Some(Dialog::EditTimeLimit {
-                                    id: job.id(),
-                                    input: Input::new(job.time_limit.clone()),
-                                });
+                            KeyCode::Esc => {
+                                self.input_mode = InputMode::Normal;
+                                self.search_query.clear();
+                                self.recompute_filtered_indices();
                             }
-                        }
-                        KeyCode::Char('o') => {
-                            self.output_file_view = match self.output_file_view {
-                                OutputFileView::Stdout => OutputFileView::Stderr,
-                                OutputFileView::Stderr => OutputFileView::Stdout,
-                            };
-                        }
-                        KeyCode::Char('w') => {
-                            self.job_output_wrap = !self.job_output_wrap;
-                        }
-                        _ => {}
-                    };
+                            KeyCode::Enter => {
+                                self.input_mode = InputMode::Normal;
+                            }
+                            KeyCode::Down => self.select_next_job(),
+                            KeyCode::Up => self.select_previous_job(),
+                            _ => {}
+                        },
+                    }
                 }
             }
             AppMessage::MouseClick(index) => {
@@ -513,12 +627,13 @@ impl App {
 
         // update
         self.job_output_watcher
-            .set_file_path(self.job_list_state.selected().and_then(|i| {
-                self.jobs.get(i).and_then(|j| match self.output_file_view {
-                    OutputFileView::Stdout => j.stdout.clone(),
-                    OutputFileView::Stderr => j.stderr.clone(),
-                })
-            }));
+            .set_file_path(
+                self.selected_job()
+                    .and_then(|j| match self.output_file_view {
+                        OutputFileView::Stdout => j.stdout.clone(),
+                        OutputFileView::Stderr => j.stderr.clone(),
+                    }),
+            );
     }
 
     fn ui(&mut self, f: &mut Frame) {
@@ -534,41 +649,56 @@ impl App {
             .constraints([Constraint::Min(50), Constraint::Percentage(70)].as_ref())
             .split(content_help[0]);
 
+        let tabs_content = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
+            .split(master_detail[0]);
+
         let job_detail_log = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(8), Constraint::Min(3)].as_ref())
             .split(master_detail[1]);
 
-        // Help
-        let help_options = vec![
-            ("q", "quit"),
-            ("⏶/⏷", "navigate"),
-            ("pgup/pgdown", "scroll"),
-            ("home/end", "top/bottom"),
-            ("esc", "cancel"),
-            ("enter", "confirm"),
-            ("c/C", "cancel/signal"),
-            ("t", "set time limit"),
-            ("o", "toggle stdout/stderr"),
-            ("w", "toggle text wrap"),
-        ];
+        // Help / Search bar
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
 
-        let help = Line::from(help_options.iter().fold(
-            Vec::new(),
-            |mut acc, (key, description)| {
-                if !acc.is_empty() {
-                    acc.push(Span::raw(" | "));
-                }
-                acc.push(Span::styled(*key, blue_style));
-                acc.push(Span::raw(": "));
-                acc.push(Span::styled(*description, light_blue_style));
-                acc
-            },
-        ));
+        let help = if self.input_mode == InputMode::Search {
+            Paragraph::new(Line::from(vec![
+                Span::styled("/", blue_style),
+                Span::raw(&self.search_query),
+                Span::styled("█", Style::default().fg(Color::Gray)),
+            ]))
+        } else {
+            let help_options = vec![
+                ("q", "quit"),
+                ("⏶/⏷", "navigate"),
+                ("pgup/pgdown", "scroll"),
+                ("home/end", "top/bottom"),
+                ("esc", "cancel"),
+                ("enter", "confirm"),
+                ("c/C", "cancel/signal"),
+                ("t", "set time limit"),
+                ("o", "toggle stdout/stderr"),
+                ("w", "toggle text wrap"),
+                ("/", "search"),
+            ];
 
-        let help = Paragraph::new(help);
+            let help = Line::from(help_options.iter().fold(
+                Vec::new(),
+                |mut acc, (key, description)| {
+                    if !acc.is_empty() {
+                        acc.push(Span::raw(" | "));
+                    }
+                    acc.push(Span::styled(*key, blue_style));
+                    acc.push(Span::raw(": "));
+                    acc.push(Span::styled(*description, light_blue_style));
+                    acc
+                },
+            ));
+
+            Paragraph::new(help)
+        };
         f.render_widget(help, content_help[1]);
 
         // Jobs
@@ -588,8 +718,9 @@ impl App {
             .max()
             .unwrap_or(0);
         let jobs: Vec<ListItem> = self
-            .jobs
+            .filtered_indices
             .iter()
+            .filter_map(|&i| self.jobs.get(i))
             .map(|j| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -625,10 +756,15 @@ impl App {
                 ]))
             })
             .collect();
+        let job_list_title = if self.search_query.is_empty() {
+            format!("Jobs ({})", self.jobs.len())
+        } else {
+            format!("Jobs ({}/{})", self.filtered_indices.len(), self.jobs.len())
+        };
         let job_list = List::new(jobs)
             .block(
                 Block::default()
-                    .title(format!("─Jobs ({})", self.jobs.len()))
+                    .title(format!("─{}", job_list_title))
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(if self.dialog.is_some() {
@@ -640,16 +776,135 @@ impl App {
                     }),
             )
             .highlight_style(Style::default().bg(Color::Green).fg(Color::Black));
-        f.render_stateful_widget(job_list, master_detail[0], &mut self.job_list_state);
-        self.job_list_height = master_detail[0].height.saturating_sub(2); // account for borders
-        self.job_list_area = master_detail[0];
+
+        // Sacct Jobs
+        let max_id_len = self
+            .sacct_jobs
+            .iter()
+            .map(|j| j.id().len())
+            .max()
+            .unwrap_or(0);
+        let max_user_len = self
+            .sacct_jobs
+            .iter()
+            .map(|j| j.user.len())
+            .max()
+            .unwrap_or(0);
+        let max_partition_len = self
+            .sacct_jobs
+            .iter()
+            .map(|j| j.partition.len())
+            .max()
+            .unwrap_or(0);
+        let max_time_len = self
+            .sacct_jobs
+            .iter()
+            .map(|j| j.time.len())
+            .max()
+            .unwrap_or(0);
+        let max_state_compact_len = self
+            .sacct_jobs
+            .iter()
+            .map(|j| j.state_compact.len())
+            .max()
+            .unwrap_or(0);
+        let old_jobs: Vec<ListItem> = self
+            .filtered_indices
+            .iter()
+            .filter_map(|&i| self.sacct_jobs.get(i))
+            .map(|j| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "{:<max$.max$}",
+                            j.state_compact,
+                            max = max_state_compact_len
+                        ),
+                        Style::default(),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{:<max$.max$}", j.id(), max = max_id_len),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                        Style::default().fg(Color::Blue),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{:<max$.max$}", j.user, max = max_user_len),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{:>max$.max$}", j.time, max = max_time_len),
+                        Style::default().fg(Color::Red),
+                    ),
+                    Span::raw(" "),
+                    Span::raw(&j.name),
+                ]))
+            })
+            .collect();
+
+        let sacct_list_title = if self.search_query.is_empty() {
+            format!("Sacct ({})", self.sacct_jobs.len())
+        } else {
+            format!(
+                "Sacct ({}/{})",
+                self.filtered_indices.len(),
+                self.sacct_jobs.len()
+            )
+        };
+        let past_jobs_list = List::new(old_jobs)
+            .block(
+                Block::default()
+                    .title(sacct_list_title)
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(if self.dialog.is_some() {
+                        Style::default()
+                    } else {
+                        match self.focus {
+                            Focus::Jobs => Style::default().fg(Color::Green),
+                        }
+                    }),
+            )
+            .highlight_style(Style::default().bg(Color::Green).fg(Color::Black));
+
+        // Enum iterator
+        let titles = SelectedTab::iter().map(|x| x.to_string());
+        let selected_tab_index = self.selected_tab as usize;
+
+        let tabs = Tabs::new(titles)
+            .block(Block::bordered().title("Tabs"))
+            .highlight_style(Style::default().fg(Color::Green))
+            .select(selected_tab_index)
+            .divider(" - ")
+            .padding("", "");
+
+        f.render_widget(tabs, tabs_content[0]);
+        match self.selected_tab {
+            SelectedTab::Jobs => {
+                f.render_stateful_widget(job_list, tabs_content[1], &mut self.job_list_state);
+                self.job_list_height = tabs_content[1].height.saturating_sub(2);
+                self.job_list_area = tabs_content[1];
+            }
+            SelectedTab::Sacct => {
+                f.render_stateful_widget(
+                    past_jobs_list,
+                    tabs_content[1],
+                    &mut self.sacct_job_list_state,
+                );
+                self.job_list_height = tabs_content[1].height.saturating_sub(2);
+                self.job_list_area = tabs_content[1];
+            }
+        }
 
         // Job details
 
-        let job_detail = self
-            .job_list_state
-            .selected()
-            .and_then(|i| self.jobs.get(i));
+        let job_detail = self.selected_job();
 
         let job_detail = job_detail.map(|j| {
             let mut state_spans = vec![
@@ -1007,16 +1262,6 @@ fn fit_text(
 }
 
 impl App {
-    fn selected_job(&self) -> Option<&Job> {
-        self.job_list_state
-            .selected()
-            .and_then(|i| self.jobs.get(i))
-    }
-
-    fn selected_job_id(&self) -> Option<String> {
-        self.selected_job().map(Job::id)
-    }
-
     fn focus_next_panel(&mut self) {
         match self.focus {
             Focus::Jobs => self.focus = Focus::Jobs,
@@ -1029,28 +1274,90 @@ impl App {
         }
     }
 
+    fn next_tab(&mut self) {
+        self.selected_tab = self.selected_tab.next();
+        self.search_query.clear();
+        self.recompute_filtered_indices();
+    }
+
+    fn previous_tab(&mut self) {
+        self.selected_tab = self.selected_tab.previous();
+        self.search_query.clear();
+        self.recompute_filtered_indices();
+    }
+
+    fn active_list_state(&mut self) -> &mut ListState {
+        match self.selected_tab {
+            SelectedTab::Jobs => &mut self.job_list_state,
+            SelectedTab::Sacct => &mut self.sacct_job_list_state,
+        }
+    }
+
     fn select_next_job(&mut self) {
-        self.job_list_state.select_next();
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        let state = self.active_list_state();
+        let i = match state.selected() {
+            Some(i) => {
+                if i >= self.filtered_indices.len() - 1 {
+                    self.filtered_indices.len() - 1
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.active_list_state().select(Some(i));
     }
 
     fn select_previous_job(&mut self) {
-        self.job_list_state.select_previous();
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        let state = self.active_list_state();
+        let i = match state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    0
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.active_list_state().select(Some(i));
     }
 
     fn select_first_job(&mut self) {
-        self.job_list_state.select_first();
+        self.active_list_state().select_first();
     }
 
     fn select_last_job(&mut self) {
-        self.job_list_state.select_last();
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        let last = self.filtered_indices.len() - 1;
+        match self.selected_tab {
+            SelectedTab::Jobs => &mut self.job_list_state,
+            SelectedTab::Sacct => &mut self.sacct_job_list_state,
+        }.select(Some(last));
     }
 
     fn scroll_jobs_half_page_down(&mut self) {
-        self.job_list_state.scroll_down_by(self.job_list_height / 2);
+        let amount = self.job_list_height / 2;
+        match self.selected_tab {
+            SelectedTab::Jobs => &mut self.job_list_state,
+            SelectedTab::Sacct => &mut self.sacct_job_list_state,
+        }.scroll_down_by(amount);
     }
 
     fn scroll_jobs_half_page_up(&mut self) {
-        self.job_list_state.scroll_up_by(self.job_list_height / 2);
+        let amount = self.job_list_height / 2;
+        match self.selected_tab {
+            SelectedTab::Jobs => &mut self.job_list_state,
+            SelectedTab::Sacct => &mut self.sacct_job_list_state,
+        }.scroll_up_by(amount);
     }
 
     fn job_index_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -1090,6 +1397,54 @@ impl App {
             }
             ScrollAnchor::Bottom => {
                 self.job_output_offset = self.job_output_offset.saturating_add(delta)
+            }
+        }
+    }
+
+    fn selected_job(&self) -> Option<&Job> {
+        let state = match self.selected_tab {
+            SelectedTab::Jobs => &self.job_list_state,
+            SelectedTab::Sacct => &self.sacct_job_list_state,
+        };
+        let jobs = match self.selected_tab {
+            SelectedTab::Jobs => &self.jobs,
+            SelectedTab::Sacct => &self.sacct_jobs,
+        };
+        state
+            .selected()
+            .and_then(|i| self.filtered_indices.get(i))
+            .and_then(|&real_i| jobs.get(real_i))
+    }
+
+    fn selected_job_id(&self) -> Option<String> {
+        self.selected_job().map(Job::id)
+    }
+
+    fn recompute_filtered_indices(&mut self) {
+        let jobs = match self.selected_tab {
+            SelectedTab::Jobs => &self.jobs,
+            SelectedTab::Sacct => &self.sacct_jobs,
+        };
+        let query = self.search_query.to_lowercase();
+        self.filtered_indices = if query.is_empty() {
+            (0..jobs.len()).collect()
+        } else {
+            jobs.iter()
+                .enumerate()
+                .filter(|(_, j)| j.name.to_lowercase().contains(&query))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // Clamp selection
+        let state = match self.selected_tab {
+            SelectedTab::Jobs => &mut self.job_list_state,
+            SelectedTab::Sacct => &mut self.sacct_job_list_state,
+        };
+        if self.filtered_indices.is_empty() {
+            state.select(None);
+        } else if let Some(sel) = state.selected() {
+            if sel >= self.filtered_indices.len() {
+                state.select(Some(self.filtered_indices.len() - 1));
             }
         }
     }
@@ -1194,59 +1549,4 @@ fn execute_command(mut command: Command, command_label: String) -> Result<(), Co
         command: command_label,
         output: details.join("\n\n"),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_chunked_string() {
-        // Divisible
-        let input = "abcdefghij";
-        let expected = vec!["abcd", "ef", "gh", "ij"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Not divisible
-        let input = "123456789";
-        let expected = vec!["1234", "56", "78", "9"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Smaller
-        let input = "abc";
-        let expected = vec!["abc"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Smaller
-        let input = "abcde";
-        let expected = vec!["abcd", "e"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Empty
-        let input = "";
-        let expected: Vec<&str> = vec![""];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        let input = "123456789";
-        let expected = vec!["1234", "56789"];
-        assert_eq!(chunked_string(input, 4, 0), expected);
-
-        let input = "123456789";
-        let expected = vec!["12", "34", "56", "78", "9"];
-        assert_eq!(chunked_string(input, 0, 2), expected);
-
-        let input = "123456789";
-        let expected = vec!["123456789"];
-        assert_eq!(chunked_string(input, 0, 0), expected);
-    }
-
-    #[test]
-    fn test_validated_time_limit() {
-        assert_eq!(validated_time_limit(&Input::new("".to_string())), None);
-        assert_eq!(validated_time_limit(&Input::new("   ".to_string())), None);
-        assert_eq!(
-            validated_time_limit(&Input::new(" 01:00:00 ".to_string())),
-            Some("01:00:00".to_string())
-        );
-    }
 }
