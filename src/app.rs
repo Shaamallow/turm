@@ -750,15 +750,8 @@ impl App {
             let help_options = [
                 ("q", "quit"),
                 ("⏶/⏷", "navigate"),
-                ("pgup/pgdown", "scroll"),
-                ("home/end", "top/bottom"),
                 ("esc", "cancel"),
                 ("enter", "confirm"),
-                ("c/C", "cancel/signal"),
-                ("t", "set time limit"),
-                ("o", "toggle stdout/stderr"),
-                ("w", "toggle text wrap"),
-                ("a", "expand/collapse array"),
                 ("/", "search"),
                 ("?", "help"),
             ];
@@ -1297,13 +1290,19 @@ impl App {
                         ("?", "show/hide help", "", ""),
                     ];
 
+                    let gap = 2;
+                    let w1 = shortcuts.iter().map(|(k, _, _, _)| k.chars().count()).max().unwrap_or(0);
+                    let w2 = shortcuts.iter().map(|(_, d, _, _)| d.chars().count()).max().unwrap_or(0);
+                    let w3 = shortcuts.iter().map(|(_, _, k, _)| k.chars().count()).max().unwrap_or(0);
+                    let w4 = shortcuts.iter().map(|(_, _, _, d)| d.chars().count()).max().unwrap_or(0);
+
                     let lines: Vec<Line> = shortcuts
                         .iter()
                         .map(|(k1, d1, k2, d2)| {
                             Line::from(vec![
-                                Span::styled(format!("{:<12}", k1), blue_style),
-                                Span::styled(format!("{:<24}", d1), light_blue_style),
-                                Span::styled(format!("{:<12}", k2), blue_style),
+                                Span::styled(format!("{:<w$}", k1, w = w1 + gap), blue_style),
+                                Span::styled(format!("{:<w$}", d1, w = w2 + gap), light_blue_style),
+                                Span::styled(format!("{:<w$}", k2, w = w3 + gap), blue_style),
                                 Span::styled(*d2, light_blue_style),
                             ])
                         })
@@ -1318,7 +1317,9 @@ impl App {
                                 .style(Style::default().fg(Color::Blue)),
                         );
 
-                    let area = centered_dialog_area(60, (shortcuts.len() + 2) as u16, f.area());
+                    let content_width = w1 + gap + w2 + gap + w3 + gap + w4;
+                    let dialog_width = content_width as u16 + 2; // +2 for borders
+                    let area = centered_dialog_area(dialog_width, (shortcuts.len() + 2) as u16, f.area());
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
