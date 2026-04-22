@@ -2,13 +2,13 @@ use crossbeam::{
     channel::{Receiver, TryRecvError, unbounded},
     select,
 };
-use itertools::Either;
-use std::{cmp::min, collections::HashSet, iter::once, path::PathBuf, process::Command};
+use std::{cmp::min, collections::HashSet, path::PathBuf, process::Command};
 use std::time::Duration;
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_acct::JobAcctWatcherHandle;
 use crate::job_watcher::JobWatcherHandle;
+use crate::utils::{copy_to_clipboard, fit_text};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::{
@@ -34,6 +34,8 @@ pub enum Dialog {
     EditTimeLimit { id: String, input: Input },
     CommandError { command: String, output: String },
     HelpPopup,
+    YankPopup,
+    YankResult(String),
 }
 
 struct CommandFailure {
@@ -475,6 +477,21 @@ impl App {
                             }
                             _ => {}
                         },
+                        Dialog::YankPopup => match key.code {
+                            KeyCode::Char('o') => {
+                                self.yank_path(false);
+                            }
+                            KeyCode::Char('s') => {
+                                self.yank_path(true);
+                            }
+                            KeyCode::Esc | KeyCode::Char('y') => {
+                                self.dialog = None;
+                            }
+                            _ => {}
+                        },
+                        Dialog::YankResult(_) => {
+                            self.dialog = None;
+                        },
                     };
 
                     if let Some((id, signal)) = scancel_request {
@@ -576,6 +593,11 @@ impl App {
                                         id: job.id(),
                                         input: Input::new(job.time_limit.clone()),
                                     });
+                                }
+                            }
+                            KeyCode::Char('y') => {
+                                if self.selected_job().is_some() {
+                                    self.dialog = Some(Dialog::YankPopup);
                                 }
                             }
                             KeyCode::Char('o') => {
@@ -1271,6 +1293,7 @@ impl App {
                         ("home/end", "top/bottom", "t", "set time limit"),
                         ("w", "toggle wrap", "o", "toggle stdout/stderr"),
                         ("a", "expand/collapse", "r", "reverse order"),
+                        ("y", "yank path", "", ""),
                         ("?", "show/hide help", "", ""),
                     ];
 
@@ -1299,99 +1322,49 @@ impl App {
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
+                Dialog::YankPopup => {
+                    let blue_style = Style::default().fg(Color::Blue);
+                    let light_blue_style = Style::default().fg(Color::LightBlue);
+
+                    let lines = vec![
+                        Line::from(vec![
+                            Span::styled("o", blue_style),
+                            Span::styled("  stdout path", light_blue_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("s", blue_style),
+                            Span::styled("  stderr path", light_blue_style),
+                        ]),
+                    ];
+
+                    let dialog = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White))
+                        .block(
+                            Block::default()
+                                .title("Yank")
+                                .borders(Borders::ALL)
+                                .style(Style::default().fg(Color::Blue)),
+                        );
+
+                    let area = centered_dialog_area(20, 4, f.area());
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+                }
+                Dialog::YankResult(msg) => {
+                    let dialog = Paragraph::new(Line::from(msg.as_str()))
+                        .style(Style::default().fg(Color::White))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .style(Style::default().fg(Color::Green)),
+                        );
+
+                    let area = centered_dialog_area(80, 3, f.area());
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+                }
             }
         }
-    }
-}
-
-fn chunked_string(s: &str, first_chunk_size: usize, chunk_size: usize) -> Vec<&str> {
-    let stepped_indices = s
-        .char_indices()
-        .map(|(i, _)| i)
-        .enumerate()
-        .filter(|&(i, _)| {
-            if i > (first_chunk_size) {
-                chunk_size > 0 && (i - first_chunk_size) % chunk_size == 0
-            } else {
-                i == 0 || i == first_chunk_size
-            }
-        })
-        .map(|(_, e)| e)
-        .collect::<Vec<_>>();
-    let windows = stepped_indices.windows(2).collect::<Vec<_>>();
-
-    let iter = windows.iter().map(|w| &s[w[0]..w[1]]);
-    let last_index = *stepped_indices.last().unwrap_or(&0);
-    iter.chain(once(&s[last_index..])).collect()
-}
-
-fn fit_text(
-    s: &'_ str,
-    lines: usize,
-    cols: usize,
-    anchor: ScrollAnchor,
-    offset: usize,
-    wrap: bool,
-) -> Text<'_> {
-    let s = s.rsplit_once(['\r', '\n']).map_or(s, |(p, _)| p); // skip everything after last line delimiter
-    let l = s.lines().flat_map(|l| l.split('\r')); // bandaid for term escape codes
-    let iter = match anchor {
-        ScrollAnchor::Top => Either::Left(l),
-        ScrollAnchor::Bottom => Either::Right(l.rev()),
-    };
-    let iter = iter
-        .skip(offset)
-        .flat_map(|l| {
-            let iter = if wrap {
-                Either::Left(
-                    chunked_string(l, cols, cols.saturating_sub(2))
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, l)| {
-                            if i == 0 {
-                                Line::raw(l.chars().take(cols).collect::<String>())
-                            } else {
-                                Line::default().spans(vec![
-                                    Span::styled(
-                                        "↪ ",
-                                        Style::default().add_modifier(Modifier::DIM),
-                                    ),
-                                    Span::raw(
-                                        l.chars().take(cols.saturating_sub(2)).collect::<String>(),
-                                    ),
-                                ])
-                            }
-                        }),
-                )
-            } else {
-                match l.chars().nth(cols) {
-                    Some(_) => {
-                        // has more chars than cols
-                        Either::Right(once(Line::default().spans(vec![
-                            Span::raw(l.chars().take(cols.saturating_sub(1)).collect::<String>()),
-                            Span::styled("…", Style::default().add_modifier(Modifier::DIM)),
-                        ])))
-                    }
-                    None => {
-                        Either::Right(once(Line::raw(l.chars().take(cols).collect::<String>())))
-                    }
-                }
-            };
-            match anchor {
-                ScrollAnchor::Top => Either::Left(iter),
-                ScrollAnchor::Bottom => Either::Right(iter.rev()),
-            }
-        })
-        .take(lines);
-
-    match anchor {
-        ScrollAnchor::Top => Text::from(iter.collect::<Vec<_>>()),
-        ScrollAnchor::Bottom => Text::from(
-            iter.collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>(),
-        ),
     }
 }
 
@@ -1658,6 +1631,25 @@ impl App {
                     self.expanded_arrays.insert(array_id);
                 }
                 self.recompute_filtered_indices();
+            }
+        }
+    }
+
+    fn yank_path(&mut self, stderr: bool) {
+        let path = self.selected_job().and_then(|j| {
+            if stderr { j.stderr.clone() } else { j.stdout.clone() }
+        });
+        match path {
+            Some(p) => {
+                let text = p.to_string_lossy().to_string();
+                match copy_to_clipboard(&text) {
+                    Ok(()) => self.dialog = Some(Dialog::YankResult(format!("Copied: {}", text))),
+                    Err(e) => self.dialog = Some(Dialog::YankResult(format!("Error: {}", e))),
+                }
+            }
+            None => {
+                let label = if stderr { "stderr" } else { "stdout" };
+                self.dialog = Some(Dialog::YankResult(format!("No {} path available", label)));
             }
         }
     }
