@@ -4,7 +4,7 @@ use crossbeam::{
 };
 use itertools::Either;
 use std::{cmp::min, collections::HashSet, iter::once, path::PathBuf, process::Command};
-use std::{process::Stdio, time::Duration};
+use std::time::Duration;
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_acct::JobAcctWatcherHandle;
@@ -33,6 +33,7 @@ pub enum Dialog {
     SelectCancelSignal { id: String, selected_signal: usize },
     EditTimeLimit { id: String, input: Input },
     CommandError { command: String, output: String },
+    HelpPopup,
 }
 
 struct CommandFailure {
@@ -106,6 +107,7 @@ pub struct App {
 
     jobs: Vec<Job>,
     job_list_state: ListState,
+    jobs_reversed: bool,
     job_output: Result<String, FileWatcherError>,
     job_output_anchor: ScrollAnchor,
     job_output_offset: u16,
@@ -115,6 +117,7 @@ pub struct App {
 
     sacct_jobs: Vec<Job>,
     sacct_job_list_state: ListState,
+    sacct_reversed: bool,
     _job_acct_watcher: JobAcctWatcherHandle,
 
     // sender: Sender<AppMessage>,
@@ -206,7 +209,12 @@ impl App {
                 Duration::from_secs(slurm_refresh_rate),
                 squeue_args.clone(),
             ),
-            job_list_state: ListState::default(),
+            job_list_state: {
+                let mut s = ListState::default();
+                s.select(Some(0));
+                s
+            },
+            jobs_reversed: false,
             job_output: Ok("".to_string()),
             job_output_anchor: ScrollAnchor::Bottom,
             job_output_offset: 0,
@@ -227,6 +235,7 @@ impl App {
                 s.select(Some(0));
                 s
             },
+            sacct_reversed: false,
 
             // sender,
             receiver,
@@ -460,6 +469,12 @@ impl App {
                             }
                             _ => {}
                         },
+                        Dialog::HelpPopup => match key.code {
+                            KeyCode::Esc | KeyCode::Char('?') => {
+                                self.dialog = None;
+                            }
+                            _ => {}
+                        },
                     };
 
                     if let Some((id, signal)) = scancel_request {
@@ -577,6 +592,24 @@ impl App {
                                     self.toggle_array_collapse();
                                 }
                             }
+                            KeyCode::Char('r') => {
+                                match self.selected_tab {
+                                    SelectedTab::Jobs => {
+                                        self.jobs_reversed = !self.jobs_reversed;
+                                        self.recompute_filtered_indices();
+                                    }
+                                    SelectedTab::Sacct => {
+                                        self.sacct_reversed = !self.sacct_reversed;
+                                        self.recompute_filtered_indices();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('?') => {
+                                self.dialog = match &self.dialog {
+                                    Some(Dialog::HelpPopup) => None,
+                                    _ => Some(Dialog::HelpPopup),
+                                };
+                            }
                             KeyCode::Char(']') => self.next_tab(),
                             KeyCode::Char('[') => self.previous_tab(),
                             KeyCode::Char('/') => {
@@ -692,7 +725,7 @@ impl App {
                 Span::styled("█", Style::default().fg(Color::Gray)),
             ]))
         } else {
-            let help_options = vec![
+            let help_options = [
                 ("q", "quit"),
                 ("⏶/⏷", "navigate"),
                 ("pgup/pgdown", "scroll"),
@@ -705,6 +738,7 @@ impl App {
                 ("w", "toggle text wrap"),
                 ("a", "expand/collapse array"),
                 ("/", "search"),
+                ("?", "help"),
             ];
 
             let help = Line::from(help_options.iter().fold(
@@ -1226,6 +1260,45 @@ impl App {
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
+                Dialog::HelpPopup => {
+                    let blue_style = Style::default().fg(Color::Blue);
+                    let light_blue_style = Style::default().fg(Color::LightBlue);
+
+                    let shortcuts = [
+                        ("q", "quit", "[/]", "prev/next tab"),
+                        ("j/k ⏶/⏷", "navigate", "/", "search"),
+                        ("pgup/down", "scroll", "c/C", "cancel/signal"),
+                        ("home/end", "top/bottom", "t", "set time limit"),
+                        ("w", "toggle wrap", "o", "toggle stdout/stderr"),
+                        ("a", "expand/collapse", "r", "reverse order"),
+                        ("?", "show/hide help", "", ""),
+                    ];
+
+                    let lines: Vec<Line> = shortcuts
+                        .iter()
+                        .map(|(k1, d1, k2, d2)| {
+                            Line::from(vec![
+                                Span::styled(format!("{:<12}", k1), blue_style),
+                                Span::styled(format!("{:<24}", d1), light_blue_style),
+                                Span::styled(format!("{:<12}", k2), blue_style),
+                                Span::styled(*d2, light_blue_style),
+                            ])
+                        })
+                        .collect();
+
+                    let dialog = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White))
+                        .block(
+                            Block::default()
+                                .title("Keybindings")
+                                .borders(Borders::ALL)
+                                .style(Style::default().fg(Color::Blue)),
+                        );
+
+                    let area = centered_dialog_area(60, (shortcuts.len() + 2) as u16, f.area());
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+                }
             }
         }
     }
@@ -1238,7 +1311,7 @@ fn chunked_string(s: &str, first_chunk_size: usize, chunk_size: usize) -> Vec<&s
         .enumerate()
         .filter(|&(i, _)| {
             if i > (first_chunk_size) {
-                chunk_size > 0 && (i - first_chunk_size).is_multiple_of(chunk_size)
+                chunk_size > 0 && (i - first_chunk_size) % chunk_size == 0
             } else {
                 i == 0 || i == first_chunk_size
             }
@@ -1487,7 +1560,7 @@ impl App {
             SelectedTab::Sacct => &self.sacct_jobs,
         };
         let query = self.search_query.to_lowercase();
-        let base_indices: Vec<usize> = if query.is_empty() {
+        let mut base_indices: Vec<usize> = if query.is_empty() {
             (0..jobs.len()).collect()
         } else {
             jobs.iter()
@@ -1499,6 +1572,10 @@ impl App {
 
         // On the Jobs tab, collapse PENDING array groups
         if matches!(self.selected_tab, SelectedTab::Jobs) {
+            if self.jobs_reversed {
+                base_indices.reverse();
+            }
+
             use std::collections::HashMap;
 
             // Group indices by array_id (only for array jobs)
@@ -1546,7 +1623,12 @@ impl App {
                 })
                 .collect();
         } else {
-            self.filtered_indices = base_indices
+            let indices: Vec<usize> = if self.sacct_reversed {
+                base_indices.into_iter().rev().collect()
+            } else {
+                base_indices
+            };
+            self.filtered_indices = indices
                 .into_iter()
                 .map(DisplayEntry::Job)
                 .collect();
