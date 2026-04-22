@@ -11,15 +11,15 @@ use crate::app::ScrollAnchor;
 
 pub fn state_color(state_compact: &str) -> Color {
     match state_compact {
-        "C" => Color::Green,       // COMPLETED
-        "F" => Color::Red,         // FAILED
-        "R" => Color::Cyan,        // RUNNING
-        "P" => Color::Yellow,      // PENDING
-        "T" => Color::Magenta,     // TIMEOUT
-        "N" => Color::Red,         // NODE_FAIL
-        "B" => Color::Red,         // BOOT_FAIL
-        "S" => Color::Yellow,      // SUSPENDED
-        "?" => Color::DarkGray,    // Unknown
+        "C" => Color::Green,    // COMPLETED
+        "F" => Color::Red,      // FAILED
+        "R" => Color::Cyan,     // RUNNING
+        "P" => Color::Yellow,   // PENDING
+        "T" => Color::Magenta,  // TIMEOUT
+        "N" => Color::Red,      // NODE_FAIL
+        "B" => Color::Red,      // BOOT_FAIL
+        "S" => Color::Yellow,   // SUSPENDED
+        "?" => Color::DarkGray, // Unknown
         _ => Color::White,
     }
 }

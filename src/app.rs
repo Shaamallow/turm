@@ -2,8 +2,8 @@ use crossbeam::{
     channel::{Receiver, TryRecvError, unbounded},
     select,
 };
-use std::{cmp::min, collections::HashSet, path::PathBuf, process::Command};
 use std::time::Duration;
+use std::{cmp::min, collections::HashSet, path::PathBuf, process::Command};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_acct::JobAcctWatcherHandle;
@@ -17,7 +17,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+    },
 };
 use std::io;
 use strum::IntoEnumIterator;
@@ -491,7 +493,7 @@ impl App {
                         },
                         Dialog::YankResult(_) => {
                             self.dialog = None;
-                        },
+                        }
                     };
 
                     if let Some((id, signal)) = scancel_request {
@@ -614,18 +616,16 @@ impl App {
                                     self.toggle_array_collapse();
                                 }
                             }
-                            KeyCode::Char('r') => {
-                                match self.selected_tab {
-                                    SelectedTab::Jobs => {
-                                        self.jobs_reversed = !self.jobs_reversed;
-                                        self.recompute_filtered_indices();
-                                    }
-                                    SelectedTab::Sacct => {
-                                        self.sacct_reversed = !self.sacct_reversed;
-                                        self.recompute_filtered_indices();
-                                    }
+                            KeyCode::Char('r') => match self.selected_tab {
+                                SelectedTab::Jobs => {
+                                    self.jobs_reversed = !self.jobs_reversed;
+                                    self.recompute_filtered_indices();
                                 }
-                            }
+                                SelectedTab::Sacct => {
+                                    self.sacct_reversed = !self.sacct_reversed;
+                                    self.recompute_filtered_indices();
+                                }
+                            },
                             KeyCode::Char('?') => {
                                 self.dialog = match &self.dialog {
                                     Some(Dialog::HelpPopup) => None,
@@ -1448,7 +1448,8 @@ impl App {
         match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
             SelectedTab::Sacct => &mut self.sacct_job_list_state,
-        }.select(Some(last));
+        }
+        .select(Some(last));
     }
 
     fn scroll_jobs_half_page_down(&mut self) {
@@ -1456,7 +1457,8 @@ impl App {
         match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
             SelectedTab::Sacct => &mut self.sacct_job_list_state,
-        }.scroll_down_by(amount);
+        }
+        .scroll_down_by(amount);
     }
 
     fn scroll_jobs_half_page_up(&mut self) {
@@ -1464,7 +1466,8 @@ impl App {
         match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
             SelectedTab::Sacct => &mut self.sacct_job_list_state,
-        }.scroll_up_by(amount);
+        }
+        .scroll_up_by(amount);
     }
 
     fn job_index_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -1601,10 +1604,7 @@ impl App {
             } else {
                 base_indices
             };
-            self.filtered_indices = indices
-                .into_iter()
-                .map(DisplayEntry::Job)
-                .collect();
+            self.filtered_indices = indices.into_iter().map(DisplayEntry::Job).collect();
         }
 
         // Clamp selection
@@ -1637,7 +1637,11 @@ impl App {
 
     fn yank_path(&mut self, stderr: bool) {
         let path = self.selected_job().and_then(|j| {
-            if stderr { j.stderr.clone() } else { j.stdout.clone() }
+            if stderr {
+                j.stderr.clone()
+            } else {
+                j.stdout.clone()
+            }
         });
         match path {
             Some(p) => {
