@@ -123,11 +123,12 @@ impl JobAcctWatcher {
                     let stderr = parts[12];
 
                     // Parse array job ID from sacct jobid format: "12345_2" → master=12345, task=2
-                    let (array_job_id, array_task_id) = if let Some((master, task)) = id.split_once('_') {
-                        (master, Some(task))
-                    } else {
-                        (id, None)
-                    };
+                    let (array_job_id, array_task_id) =
+                        if let Some((master, task)) = id.split_once('_') {
+                            (master, Some(task))
+                        } else {
+                            (id, None)
+                        };
 
                     Some(Job {
                         job_id: id.to_owned(),

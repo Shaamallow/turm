@@ -16,7 +16,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+    },
 };
 use std::io;
 use strum::IntoEnumIterator;
@@ -1341,7 +1343,8 @@ impl App {
         match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
             SelectedTab::Sacct => &mut self.sacct_job_list_state,
-        }.select(Some(last));
+        }
+        .select(Some(last));
     }
 
     fn scroll_jobs_half_page_down(&mut self) {
@@ -1349,7 +1352,8 @@ impl App {
         match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
             SelectedTab::Sacct => &mut self.sacct_job_list_state,
-        }.scroll_down_by(amount);
+        }
+        .scroll_down_by(amount);
     }
 
     fn scroll_jobs_half_page_up(&mut self) {
@@ -1357,7 +1361,8 @@ impl App {
         match self.selected_tab {
             SelectedTab::Jobs => &mut self.job_list_state,
             SelectedTab::Sacct => &mut self.sacct_job_list_state,
-        }.scroll_up_by(amount);
+        }
+        .scroll_up_by(amount);
     }
 
     fn job_index_at(&self, column: u16, row: u16) -> Option<usize> {
