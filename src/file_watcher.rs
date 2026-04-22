@@ -184,7 +184,6 @@ impl FileWatcherHandle {
 
     pub fn set_file_path(&mut self, file_path: Option<PathBuf>) {
         if self.file_path != file_path {
-            log::debug!("file_watcher: switching to {:?}", file_path);
             self.file_path = file_path.clone();
             self.sender
                 .send(FileWatcherMessage::FilePath(file_path))

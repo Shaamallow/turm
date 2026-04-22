@@ -73,8 +73,6 @@ impl JobAcctWatcher {
         let output_format_sacct = fields_sacct.join(",");
 
         loop {
-            log::debug!("sacct: running command with args: {:?}", self.sacct_args);
-
             let output = Command::new("sacct")
                 .args(&self.sacct_args)
                 .arg("--parsable2")
@@ -85,14 +83,6 @@ impl JobAcctWatcher {
                 .output()
                 .expect("failed to execute sacct process");
 
-            let raw_stdout = String::from_utf8_lossy(&output.stdout);
-            let raw_stderr = String::from_utf8_lossy(&output.stderr);
-            log::debug!("sacct: exit status: {}", output.status);
-            if !raw_stderr.is_empty() {
-                log::warn!("sacct stderr: {}", raw_stderr.trim());
-            }
-            log::debug!("sacct: raw stdout ({} bytes):\n{}", raw_stdout.len(), raw_stdout);
-
             let jobs_sacct: Vec<Job> = output
                 .stdout
                 .lines()
@@ -102,7 +92,6 @@ impl JobAcctWatcher {
                     let parts: Vec<_> = l.split(output_separator).collect();
 
                     if parts.len() != fields_sacct.len() {
-                        log::debug!("sacct: skipping line (got {} parts, expected {}): {}", parts.len(), fields_sacct.len(), l);
                         return None;
                     }
 
@@ -113,12 +102,10 @@ impl JobAcctWatcher {
 
                     // remove the .batch and .extern jobs from sacct
                     if id.contains(".") {
-                        log::debug!("sacct: skipping sub-job: {}", id);
                         return None;
                     }
                     // do not print running jobs, handled by squeue
                     if state == "RUNNING" {
-                        log::debug!("sacct: skipping RUNNING job: {}", id);
                         return None;
                     }
 
@@ -141,11 +128,6 @@ impl JobAcctWatcher {
                     } else {
                         (id, None)
                     };
-
-                    log::debug!(
-                        "sacct: parsed job {} (state={}, name={}, array_master={}, array_task={:?}, stdout={}, stderr={})",
-                        id, state, name, array_job_id, array_task_id, stdout, stderr
-                    );
 
                     Some(Job {
                         job_id: id.to_owned(),
@@ -191,7 +173,6 @@ impl JobAcctWatcher {
                 })
                 .collect();
 
-            log::info!("sacct: sending {} jobs", jobs_sacct.len());
             self.app.send(AppMessage::SacctJobs(jobs_sacct)).unwrap();
             thread::sleep(self.interval);
         }

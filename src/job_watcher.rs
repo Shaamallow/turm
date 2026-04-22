@@ -52,8 +52,6 @@ impl JobWatcher {
             .join(",");
 
         loop {
-            log::debug!("squeue: running command with args: {:?}", self.squeue_args);
-
             let output = Command::new("squeue")
                 .args(&self.squeue_args)
                 .arg("--array")
@@ -62,12 +60,6 @@ impl JobWatcher {
                 .arg(&output_format)
                 .output()
                 .expect("failed to execute process");
-
-            let raw_stderr = String::from_utf8_lossy(&output.stderr);
-            if !raw_stderr.is_empty() {
-                log::warn!("squeue stderr: {}", raw_stderr.trim());
-            }
-            log::debug!("squeue: exit status: {}, stdout {} bytes", output.status, output.stdout.len());
 
             let jobs: Vec<Job> = output
                 .stdout
@@ -147,7 +139,6 @@ impl JobWatcher {
                     })
                 })
                 .collect();
-            log::info!("squeue: sending {} jobs", jobs.len());
             self.app.send(AppMessage::Jobs(jobs)).unwrap();
             thread::sleep(self.interval);
         }
