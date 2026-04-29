@@ -69,6 +69,7 @@ impl JobAcctWatcher {
             "WorkDir",
             "StdOut",
             "StdErr",
+            "QOS",
         ];
         let output_format_sacct = fields_sacct.join(",");
 
@@ -121,6 +122,7 @@ impl JobAcctWatcher {
                     let working_dir = parts[10];
                     let stdout = parts[11];
                     let stderr = parts[12];
+                    let qos = parts[13];
 
                     // Parse array job ID from sacct jobid format: "12345_2" → master=12345, task=2
                     let (array_job_id, array_task_id) =
@@ -148,6 +150,7 @@ impl JobAcctWatcher {
                         start_time: String::new(),
                         tres: tres.to_owned(),
                         partition: partition.to_owned(),
+                        qos: qos.to_owned(),
                         nodelist: nodelist.to_owned(),
                         command: command.to_owned(),
                         stdout: Self::resolve_path(

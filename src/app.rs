@@ -136,6 +136,7 @@ pub struct App {
     search_query: String,
     filtered_indices: Vec<DisplayEntry>,
     expanded_arrays: HashSet<String>,
+    show_qos: bool,
 }
 
 pub struct Job {
@@ -152,6 +153,7 @@ pub struct Job {
     pub start_time: String,
     pub tres: String,
     pub partition: String,
+    pub qos: String,
     pub nodelist: String,
     pub stdout: Option<PathBuf>,
     pub stderr: Option<PathBuf>,
@@ -253,6 +255,7 @@ impl App {
             search_query: String::new(),
             filtered_indices: Vec::new(),
             expanded_arrays: HashSet::new(),
+            show_qos: false,
         }
     }
 }
@@ -614,6 +617,9 @@ impl App {
                             KeyCode::Char('w') => {
                                 self.job_output_wrap = !self.job_output_wrap;
                             }
+                            KeyCode::Char('p') => {
+                                self.show_qos = !self.show_qos;
+                            }
                             KeyCode::Char('a') => {
                                 if matches!(self.selected_tab, SelectedTab::Jobs) {
                                     self.toggle_array_collapse();
@@ -782,7 +788,7 @@ impl App {
         let max_partition_len = self
             .jobs
             .iter()
-            .map(|j| j.partition.len())
+            .map(|j| if self.show_qos { j.qos.len() } else { j.partition.len() })
             .max()
             .unwrap_or(0);
         let max_time_len = self.jobs.iter().map(|j| j.time.len()).max().unwrap_or(0);
@@ -813,7 +819,7 @@ impl App {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                            format!("{:<max$.max$}", if self.show_qos { &j.qos } else { &j.partition }, max = max_partition_len),
                             Style::default().fg(Color::Blue),
                         ),
                         Span::raw(" "),
@@ -847,7 +853,7 @@ impl App {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                            format!("{:<max$.max$}", if self.show_qos { &j.qos } else { &j.partition }, max = max_partition_len),
                             Style::default().fg(Color::Blue),
                         ),
                         Span::raw(" "),
@@ -906,7 +912,7 @@ impl App {
         let max_partition_len = self
             .sacct_jobs
             .iter()
-            .map(|j| j.partition.len())
+            .map(|j| if self.show_qos { j.qos.len() } else { j.partition.len() })
             .max()
             .unwrap_or(0);
         let max_time_len = self
@@ -942,7 +948,7 @@ impl App {
                     ),
                     Span::raw(" "),
                     Span::styled(
-                        format!("{:<max$.max$}", j.partition, max = max_partition_len),
+                        format!("{:<max$.max$}", if self.show_qos { &j.qos } else { &j.partition }, max = max_partition_len),
                         Style::default().fg(Color::Blue),
                     ),
                     Span::raw(" "),
@@ -1288,8 +1294,8 @@ impl App {
                         ("pgup/down", "scroll", "c/C", "cancel/signal"),
                         ("home/end", "top/bottom", "t", "set time limit"),
                         ("w", "toggle wrap", "o", "toggle stdout/stderr"),
-                        ("a", "expand/collapse", "r", "reverse order"),
-                        ("y", "yank path", "", ""),
+                        ("p", "partition/qos", "a", "expand/collapse"),
+                        ("r", "reverse order", "y", "yank path"),
                         ("?", "show/hide help", "", ""),
                     ];
 

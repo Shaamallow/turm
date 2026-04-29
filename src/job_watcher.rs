@@ -46,6 +46,7 @@ impl JobWatcher {
             "ArrayTaskID", // %a
             "NodeList",    // %N
             "WorkDir",     // for fallback
+            "qos",
         ];
         let output_format = fields
             .map(|s| s.to_owned() + ":" + output_separator)
@@ -92,6 +93,7 @@ impl JobWatcher {
                     let array_task_id = parts[16];
                     let node_list = parts[17];
                     let working_dir = parts[18];
+                    let qos = parts[19];
 
                     Some(Job {
                         job_id: id.to_owned(),
@@ -114,6 +116,7 @@ impl JobWatcher {
                         start_time: start_time.to_owned(),
                         tres: tres.to_owned(),
                         partition: partition.to_owned(),
+                        qos: qos.to_owned(),
                         nodelist: nodelist.to_owned(),
                         command: command.to_owned(),
                         stdout: Self::resolve_path(
