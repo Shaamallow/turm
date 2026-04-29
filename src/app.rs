@@ -486,6 +486,9 @@ impl App {
                             KeyCode::Char('s') => {
                                 self.yank_path(true);
                             }
+                            KeyCode::Char('i') => {
+                                self.yank_job_id();
+                            }
                             KeyCode::Esc | KeyCode::Char('y') => {
                                 self.dialog = None;
                             }
@@ -1336,6 +1339,10 @@ impl App {
                             Span::styled("s", blue_style),
                             Span::styled("  stderr path", light_blue_style),
                         ]),
+                        Line::from(vec![
+                            Span::styled("i", blue_style),
+                            Span::styled("  job id", light_blue_style),
+                        ]),
                     ];
 
                     let dialog = Paragraph::new(lines)
@@ -1347,7 +1354,7 @@ impl App {
                                 .style(Style::default().fg(Color::Blue)),
                         );
 
-                    let area = centered_dialog_area(20, 4, f.area());
+                    let area = centered_dialog_area(20, 5, f.area());
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
@@ -1655,6 +1662,21 @@ impl App {
             None => {
                 let label = if stderr { "stderr" } else { "stdout" };
                 self.dialog = Some(Dialog::YankResult(format!("No {} path available", label)));
+            }
+        }
+    }
+
+    fn yank_job_id(&mut self) {
+        match self.selected_job() {
+            Some(job) => {
+                let id = job.job_id.clone();
+                match copy_to_clipboard(&id) {
+                    Ok(()) => self.dialog = Some(Dialog::YankResult(format!("Copied: {}", id))),
+                    Err(e) => self.dialog = Some(Dialog::YankResult(format!("Error: {}", e))),
+                }
+            }
+            None => {
+                self.dialog = Some(Dialog::YankResult("No job selected".to_string()));
             }
         }
     }
