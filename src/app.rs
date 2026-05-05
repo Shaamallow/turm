@@ -1568,41 +1568,37 @@ impl App {
 
             use std::collections::HashMap;
 
-            // Group indices by array_id (only for array jobs)
-            let mut array_groups: HashMap<&str, Vec<usize>> = HashMap::new();
-            let mut order: Vec<&str> = Vec::new();
-
+            // Count PENDING entries per array_id (only for array jobs)
+            let mut pending_counts: HashMap<&str, usize> = HashMap::new();
             for &idx in &base_indices {
                 let job = &jobs[idx];
-                if job.array_step.is_some() {
-                    let entry = array_groups.entry(&job.array_id).or_default();
-                    if entry.is_empty() {
-                        order.push(&job.array_id);
-                    }
-                    entry.push(idx);
+                if job.array_step.is_some() && job.state == "PENDING" {
+                    *pending_counts.entry(&job.array_id).or_default() += 1;
                 }
             }
 
-            // Determine which array_ids should be collapsed
+            // Determine which array_ids should have their PENDING subset collapsed
             let mut collapsed_ids: HashSet<&str> = HashSet::new();
-            for (array_id, indices) in &array_groups {
-                if indices.len() > 1
-                    && !self.expanded_arrays.contains(*array_id)
-                    && indices.iter().all(|&i| jobs[i].state == "PENDING")
-                {
+            for (array_id, count) in &pending_counts {
+                if *count > 1 && !self.expanded_arrays.contains(*array_id) {
                     collapsed_ids.insert(array_id);
                 }
             }
 
-            // Build display entries
+            // Build display entries: collapse only the PENDING entries of an array
+            // into a single group header; non-PENDING entries (e.g. RUNNING) display
+            // individually.
             let mut seen_collapsed: HashSet<&str> = HashSet::new();
             self.filtered_indices = base_indices
                 .iter()
                 .filter_map(|&idx| {
                     let job = &jobs[idx];
-                    if job.array_step.is_some() && collapsed_ids.contains(job.array_id.as_str()) {
+                    let is_collapsible_pending = job.array_step.is_some()
+                        && job.state == "PENDING"
+                        && collapsed_ids.contains(job.array_id.as_str());
+                    if is_collapsible_pending {
                         if seen_collapsed.insert(&job.array_id) {
-                            let total = array_groups[job.array_id.as_str()].len();
+                            let total = pending_counts[job.array_id.as_str()];
                             Some(DisplayEntry::CollapsedGroup { index: idx, total })
                         } else {
                             None // skip, already represented by group header
