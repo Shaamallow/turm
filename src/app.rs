@@ -33,11 +33,49 @@ pub enum Focus {
 pub enum Dialog {
     ConfirmCancelJob(String),
     SelectCancelSignal { id: String, selected_signal: usize },
-    EditTimeLimit { id: String, input: Input },
+    EditPopup { id: String },
+    EditField { id: String, field: EditField, input: Input },
     CommandError { command: String, output: String },
     HelpPopup,
     YankPopup,
     YankResult(String),
+}
+
+#[derive(Clone, Copy)]
+pub enum EditField {
+    TimeLimit,
+    Qos,
+    JobName,
+    Account,
+}
+
+impl EditField {
+    fn label(self) -> &'static str {
+        match self {
+            EditField::TimeLimit => "time limit",
+            EditField::Qos => "QOS",
+            EditField::JobName => "job name",
+            EditField::Account => "account",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            EditField::TimeLimit => "─Time Limit",
+            EditField::Qos => "─QOS",
+            EditField::JobName => "─Job Name",
+            EditField::Account => "─Account",
+        }
+    }
+
+    fn scontrol_key(self) -> &'static str {
+        match self {
+            EditField::TimeLimit => "TimeLimit",
+            EditField::Qos => "QOS",
+            EditField::JobName => "JobName",
+            EditField::Account => "Account",
+        }
+    }
 }
 
 struct CommandFailure {
@@ -412,7 +450,8 @@ impl App {
                 if self.dialog.is_some() {
                     let mut close_dialog = false;
                     let mut scancel_request = None;
-                    let mut timelimit_request = None;
+                    let mut edit_request: Option<(String, EditField, String)> = None;
+                    let mut open_edit_field: Option<(String, EditField)> = None;
                     let mut command_failure = None;
 
                     match self.dialog.as_mut().expect("dialog must exist") {
@@ -456,10 +495,28 @@ impl App {
                             }
                             _ => {}
                         },
-                        Dialog::EditTimeLimit { id, input } => match key.code {
+                        Dialog::EditPopup { id } => match key.code {
+                            KeyCode::Char('t') => {
+                                open_edit_field = Some((id.clone(), EditField::TimeLimit));
+                            }
+                            KeyCode::Char('s') => {
+                                open_edit_field = Some((id.clone(), EditField::Qos));
+                            }
+                            KeyCode::Char('n') => {
+                                open_edit_field = Some((id.clone(), EditField::JobName));
+                            }
+                            KeyCode::Char('a') => {
+                                open_edit_field = Some((id.clone(), EditField::Account));
+                            }
+                            KeyCode::Esc | KeyCode::Char('e') => {
+                                close_dialog = true;
+                            }
+                            _ => {}
+                        },
+                        Dialog::EditField { id, field, input } => match key.code {
                             KeyCode::Enter => {
-                                if let Some(time_limit) = validated_time_limit(input) {
-                                    timelimit_request = Some((id.clone(), time_limit));
+                                if let Some(value) = validated_edit_value(input) {
+                                    edit_request = Some((id.clone(), *field, value));
                                     close_dialog = true;
                                 }
                             }
@@ -505,10 +562,25 @@ impl App {
                     if let Some((id, signal)) = scancel_request {
                         command_failure = execute_scancel(&id, signal).err();
                     }
-                    if let Some((id, time_limit)) = timelimit_request {
-                        command_failure = execute_scontrol_update_timelimit(&id, &time_limit).err();
+                    if let Some((id, field, value)) = edit_request {
+                        command_failure = execute_scontrol_update(&id, field, &value).err();
                     }
-                    if let Some(CommandFailure { command, output }) = command_failure {
+                    if let Some((id, field)) = open_edit_field {
+                        let initial = self
+                            .selected_job()
+                            .map(|j| match field {
+                                EditField::TimeLimit => j.time_limit.clone(),
+                                EditField::Qos => j.qos.clone(),
+                                EditField::JobName => j.name.clone(),
+                                EditField::Account => String::new(),
+                            })
+                            .unwrap_or_default();
+                        self.dialog = Some(Dialog::EditField {
+                            id,
+                            field,
+                            input: Input::new(initial),
+                        });
+                    } else if let Some(CommandFailure { command, output }) = command_failure {
                         self.dialog = Some(Dialog::CommandError { command, output });
                     } else if close_dialog {
                         self.dialog = None;
@@ -595,12 +667,9 @@ impl App {
                                     });
                                 }
                             }
-                            KeyCode::Char('t') => {
-                                if let Some(job) = self.selected_job() {
-                                    self.dialog = Some(Dialog::EditTimeLimit {
-                                        id: job.id(),
-                                        input: Input::new(job.time_limit.clone()),
-                                    });
+                            KeyCode::Char('e') => {
+                                if let Some(id) = self.selected_job_id() {
+                                    self.dialog = Some(Dialog::EditPopup { id });
                                 }
                             }
                             KeyCode::Char('y') => {
@@ -1218,16 +1287,52 @@ impl App {
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
-                Dialog::EditTimeLimit { id, input } => {
+                Dialog::EditPopup { .. } => {
+                    let blue_style = Style::default().fg(Color::Blue);
+                    let light_blue_style = Style::default().fg(Color::LightBlue);
+
+                    let lines = vec![
+                        Line::from(vec![
+                            Span::styled("t", blue_style),
+                            Span::styled("  time limit", light_blue_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("s", blue_style),
+                            Span::styled("  qos", light_blue_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("n", blue_style),
+                            Span::styled("  job name", light_blue_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("a", blue_style),
+                            Span::styled("  account", light_blue_style),
+                        ]),
+                    ];
+
+                    let dialog = Paragraph::new(lines)
+                        .style(Style::default().fg(Color::White))
+                        .block(
+                            Block::default()
+                                .title("Edit")
+                                .borders(Borders::ALL)
+                                .style(Style::default().fg(Color::Blue)),
+                        );
+
+                    let area = centered_dialog_area(20, 6, f.area());
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+                }
+                Dialog::EditField { id, field, input } => {
                     let block = Block::default()
-                        .title("─Time Limit")
+                        .title(field.title())
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .style(Style::default().fg(Color::Green));
 
                     let area = centered_dialog_area(DIALOG_WIDTH, 3, f.area());
                     let inner = block.inner(area);
-                    let prompt_prefix = "Set time limit for job ";
+                    let prompt_prefix = format!("Set {} for job ", field.label());
                     let prompt_suffix = ": ";
                     let prompt_width = (prompt_prefix.chars().count()
                         + id.chars().count()
@@ -1292,7 +1397,7 @@ impl App {
                         ("q", "quit", "[/]", "prev/next tab"),
                         ("j/k ⏶/⏷", "navigate", "/", "search"),
                         ("pgup/down", "scroll", "c/C", "cancel/signal"),
-                        ("home/end", "top/bottom", "t", "set time limit"),
+                        ("home/end", "top/bottom", "e", "edit job"),
                         ("w", "toggle wrap", "o", "toggle stdout/stderr"),
                         ("p", "partition/qos", "a", "expand/collapse"),
                         ("r", "reverse order", "y", "yank path"),
@@ -1704,12 +1809,12 @@ fn signal_index_for_digit(digit: char) -> Option<usize> {
     if value == 0 { None } else { Some(value - 1) }
 }
 
-fn validated_time_limit(input: &Input) -> Option<String> {
-    let time_limit = input.value().trim();
-    if time_limit.is_empty() {
+fn validated_edit_value(input: &Input) -> Option<String> {
+    let value = input.value().trim();
+    if value.is_empty() {
         None
     } else {
-        Some(time_limit.to_string())
+        Some(value.to_string())
     }
 }
 
@@ -1727,16 +1832,21 @@ fn execute_scancel(job_id: &str, signal: Option<&str>) -> Result<(), CommandFail
     execute_command(command, command_display)
 }
 
-fn execute_scontrol_update_timelimit(job_id: &str, time_limit: &str) -> Result<(), CommandFailure> {
+fn execute_scontrol_update(
+    job_id: &str,
+    field: EditField,
+    value: &str,
+) -> Result<(), CommandFailure> {
+    let key = field.scontrol_key();
     let mut command = Command::new("scontrol");
     command
         .arg("update")
         .arg(format!("JobId={job_id}"))
-        .arg(format!("TimeLimit={time_limit}"));
+        .arg(format!("{key}={value}"));
 
     execute_command(
         command,
-        format!("scontrol update JobId={job_id} TimeLimit={time_limit}"),
+        format!("scontrol update JobId={job_id} {key}={value}"),
     )
 }
 
