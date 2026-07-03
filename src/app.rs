@@ -241,6 +241,7 @@ impl App {
         slurm_refresh_rate: u64,
         file_refresh_rate: u64,
         squeue_args: Vec<String>,
+        sacct_starttime: String,
     ) -> App {
         let (sender, receiver) = unbounded();
         Self {
@@ -273,6 +274,7 @@ impl App {
                 sender.clone(),
                 Duration::from_secs(slurm_refresh_rate),
                 squeue_args,
+                sacct_starttime,
             ),
             sacct_job_list_state: {
                 let mut s = ListState::default();

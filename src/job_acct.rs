@@ -11,6 +11,7 @@ struct JobAcctWatcher {
     app: Sender<AppMessage>,
     interval: Duration,
     sacct_args: Vec<String>,
+    starttime: String,
 }
 
 /// Filter squeue CLI args to only those compatible with sacct,
@@ -45,11 +46,17 @@ fn sacct_compatible_args(squeue_args: &[String]) -> Vec<String> {
 }
 
 impl JobAcctWatcher {
-    fn new(app: Sender<AppMessage>, interval: Duration, squeue_args: Vec<String>) -> Self {
+    fn new(
+        app: Sender<AppMessage>,
+        interval: Duration,
+        squeue_args: Vec<String>,
+        starttime: String,
+    ) -> Self {
         Self {
             app,
             interval,
             sacct_args: sacct_compatible_args(&squeue_args),
+            starttime,
         }
     }
 
@@ -76,6 +83,7 @@ impl JobAcctWatcher {
         loop {
             let output = Command::new("sacct")
                 .args(&self.sacct_args)
+                .arg(format!("--starttime={}", self.starttime))
                 .arg("--parsable2")
                 .arg("--noheader")
                 .arg(format!("--delimiter={}", output_separator))
@@ -249,8 +257,13 @@ impl JobAcctWatcher {
 pub struct JobAcctWatcherHandle {}
 
 impl JobAcctWatcherHandle {
-    pub fn new(app: Sender<AppMessage>, interval: Duration, squeue_args: Vec<String>) -> Self {
-        let mut actor = JobAcctWatcher::new(app, interval, squeue_args);
+    pub fn new(
+        app: Sender<AppMessage>,
+        interval: Duration,
+        squeue_args: Vec<String>,
+        starttime: String,
+    ) -> Self {
+        let mut actor = JobAcctWatcher::new(app, interval, squeue_args, starttime);
         thread::spawn(move || actor.run());
 
         Self {}

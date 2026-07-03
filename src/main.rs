@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long, value_name = "SECONDS", default_value_t = 2)]
     file_refresh: u64,
 
+    /// Earliest submit/start time of completed jobs to fetch from sacct
+    /// (passed as `sacct --starttime`). Accepts any sacct time format,
+    /// e.g. `now-1day`, `now-7days`, `today`, `2026-01-01`, `HH:MM`.
+    #[arg(long, value_name = "TIME", default_value = "now-1day")]
+    since: String,
+
     /// squeue arguments
     #[command(flatten)]
     squeue_args: SqueueArgs,
@@ -135,6 +141,7 @@ fn run_app<B: Backend<Error = io::Error>>(terminal: &mut Terminal<B>, args: Cli)
         args.slurm_refresh,
         args.file_refresh,
         args.squeue_args.to_vec(),
+        args.since,
     );
     thread::spawn(move || input_loop(input_tx));
     app.run(terminal)
