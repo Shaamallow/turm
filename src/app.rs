@@ -32,10 +32,22 @@ pub enum Focus {
 
 pub enum Dialog {
     ConfirmCancelJob(String),
-    SelectCancelSignal { id: String, selected_signal: usize },
-    EditPopup { id: String },
-    EditField { id: String, field: EditField, input: Input },
-    CommandError { command: String, output: String },
+    SelectCancelSignal {
+        id: String,
+        selected_signal: usize,
+    },
+    EditPopup {
+        id: String,
+    },
+    EditField {
+        id: String,
+        field: EditField,
+        input: Input,
+    },
+    CommandError {
+        command: String,
+        output: String,
+    },
     HelpPopup,
     YankPopup,
     YankResult(String),
@@ -172,6 +184,7 @@ pub struct App {
     pending_input_event: Option<Event>,
     input_mode: InputMode,
     search_query: String,
+    search_by_id: bool,
     filtered_indices: Vec<DisplayEntry>,
     expanded_arrays: HashSet<String>,
     show_qos: bool,
@@ -293,6 +306,7 @@ impl App {
             pending_input_event: None,
             input_mode: InputMode::default(),
             search_query: String::new(),
+            search_by_id: false,
             filtered_indices: Vec::new(),
             expanded_arrays: HashSet::new(),
             show_qos: false,
@@ -716,6 +730,13 @@ impl App {
                             KeyCode::Char('[') => self.previous_tab(),
                             KeyCode::Char('/') => {
                                 self.input_mode = InputMode::Search;
+                                self.search_by_id = false;
+                                self.search_query.clear();
+                                self.recompute_filtered_indices();
+                            }
+                            KeyCode::Char('#') => {
+                                self.input_mode = InputMode::Search;
+                                self.search_by_id = true;
                                 self.search_query.clear();
                                 self.recompute_filtered_indices();
                             }
@@ -744,6 +765,7 @@ impl App {
                             }
                             KeyCode::Esc => {
                                 self.input_mode = InputMode::Normal;
+                                self.search_by_id = false;
                                 self.search_query.clear();
                                 self.recompute_filtered_indices();
                             }
@@ -821,8 +843,9 @@ impl App {
         let light_blue_style = Style::default().fg(Color::LightBlue);
 
         let help = if self.input_mode == InputMode::Search {
+            let prefix = if self.search_by_id { "#" } else { "/" };
             Paragraph::new(Line::from(vec![
-                Span::styled("/", blue_style),
+                Span::styled(prefix, blue_style),
                 Span::raw(&self.search_query),
                 Span::styled("█", Style::default().fg(Color::Gray)),
             ]))
@@ -833,6 +856,7 @@ impl App {
                 ("esc", "cancel"),
                 ("enter", "confirm"),
                 ("/", "search"),
+                ("#", "search id"),
                 ("?", "help"),
             ];
 
@@ -859,7 +883,13 @@ impl App {
         let max_partition_len = self
             .jobs
             .iter()
-            .map(|j| if self.show_qos { j.qos.len() } else { j.partition.len() })
+            .map(|j| {
+                if self.show_qos {
+                    j.qos.len()
+                } else {
+                    j.partition.len()
+                }
+            })
             .max()
             .unwrap_or(0);
         let max_time_len = self.jobs.iter().map(|j| j.time.len()).max().unwrap_or(0);
@@ -890,7 +920,11 @@ impl App {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            format!("{:<max$.max$}", if self.show_qos { &j.qos } else { &j.partition }, max = max_partition_len),
+                            format!(
+                                "{:<max$.max$}",
+                                if self.show_qos { &j.qos } else { &j.partition },
+                                max = max_partition_len
+                            ),
                             Style::default().fg(Color::Blue),
                         ),
                         Span::raw(" "),
@@ -924,7 +958,11 @@ impl App {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            format!("{:<max$.max$}", if self.show_qos { &j.qos } else { &j.partition }, max = max_partition_len),
+                            format!(
+                                "{:<max$.max$}",
+                                if self.show_qos { &j.qos } else { &j.partition },
+                                max = max_partition_len
+                            ),
                             Style::default().fg(Color::Blue),
                         ),
                         Span::raw(" "),
@@ -983,7 +1021,13 @@ impl App {
         let max_partition_len = self
             .sacct_jobs
             .iter()
-            .map(|j| if self.show_qos { j.qos.len() } else { j.partition.len() })
+            .map(|j| {
+                if self.show_qos {
+                    j.qos.len()
+                } else {
+                    j.partition.len()
+                }
+            })
             .max()
             .unwrap_or(0);
         let max_time_len = self
@@ -1019,7 +1063,11 @@ impl App {
                     ),
                     Span::raw(" "),
                     Span::styled(
-                        format!("{:<max$.max$}", if self.show_qos { &j.qos } else { &j.partition }, max = max_partition_len),
+                        format!(
+                            "{:<max$.max$}",
+                            if self.show_qos { &j.qos } else { &j.partition },
+                            max = max_partition_len
+                        ),
                         Style::default().fg(Color::Blue),
                     ),
                     Span::raw(" "),
@@ -1397,7 +1445,7 @@ impl App {
 
                     let shortcuts = [
                         ("q", "quit", "[/]", "prev/next tab"),
-                        ("j/k ⏶/⏷", "navigate", "/", "search"),
+                        ("j/k ⏶/⏷", "navigate", "//#", "search name/id"),
                         ("pgup/down", "scroll", "c/C", "cancel/signal"),
                         ("home/end", "top/bottom", "e", "edit job"),
                         ("w", "toggle wrap", "o", "toggle stdout/stderr"),
@@ -1407,10 +1455,26 @@ impl App {
                     ];
 
                     let gap = 2;
-                    let w1 = shortcuts.iter().map(|(k, _, _, _)| k.chars().count()).max().unwrap_or(0);
-                    let w2 = shortcuts.iter().map(|(_, d, _, _)| d.chars().count()).max().unwrap_or(0);
-                    let w3 = shortcuts.iter().map(|(_, _, k, _)| k.chars().count()).max().unwrap_or(0);
-                    let w4 = shortcuts.iter().map(|(_, _, _, d)| d.chars().count()).max().unwrap_or(0);
+                    let w1 = shortcuts
+                        .iter()
+                        .map(|(k, _, _, _)| k.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    let w2 = shortcuts
+                        .iter()
+                        .map(|(_, d, _, _)| d.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    let w3 = shortcuts
+                        .iter()
+                        .map(|(_, _, k, _)| k.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    let w4 = shortcuts
+                        .iter()
+                        .map(|(_, _, _, d)| d.chars().count())
+                        .max()
+                        .unwrap_or(0);
 
                     let lines: Vec<Line> = shortcuts
                         .iter()
@@ -1435,7 +1499,8 @@ impl App {
 
                     let content_width = w1 + gap + w2 + gap + w3 + gap + w4;
                     let dialog_width = content_width as u16 + 2; // +2 for borders
-                    let area = centered_dialog_area(dialog_width, (shortcuts.len() + 2) as u16, f.area());
+                    let area =
+                        centered_dialog_area(dialog_width, (shortcuts.len() + 2) as u16, f.area());
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
@@ -1504,12 +1569,14 @@ impl App {
 
     fn next_tab(&mut self) {
         self.selected_tab = self.selected_tab.next();
+        self.search_by_id = false;
         self.search_query.clear();
         self.recompute_filtered_indices();
     }
 
     fn previous_tab(&mut self) {
         self.selected_tab = self.selected_tab.previous();
+        self.search_by_id = false;
         self.search_query.clear();
         self.recompute_filtered_indices();
     }
@@ -1657,12 +1724,16 @@ impl App {
             SelectedTab::Sacct => &self.sacct_jobs,
         };
         let query = self.search_query.to_lowercase();
+        let search_by_id = self.search_by_id;
         let mut base_indices: Vec<usize> = if query.is_empty() {
             (0..jobs.len()).collect()
         } else {
             jobs.iter()
                 .enumerate()
-                .filter(|(_, j)| j.name.to_lowercase().contains(&query))
+                .filter(|(_, j)| {
+                    let haystack = if search_by_id { j.id() } else { j.name.clone() };
+                    haystack.to_lowercase().contains(&query)
+                })
                 .map(|(i, _)| i)
                 .collect()
         };
